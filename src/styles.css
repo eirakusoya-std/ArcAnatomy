@@ -222,7 +222,9 @@ input[type="checkbox"] {
 
 .circle-list,
 .formula-box,
-.arc-list {
+.arc-list,
+.debug-grid,
+.debug-table {
   display: grid;
   gap: 10px;
 }
@@ -295,4 +297,30 @@ code {
 
 .formula-box strong {
   font-size: 13px;
+}
+
+.debug-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.debug-tile {
+  margin: 0;
+  border: 1px solid #ddd6ca;
+  border-radius: 8px;
+  background: #fffdf8;
+  overflow: hidden;
+}
+
+.debug-tile img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1.2;
+  object-fit: contain;
+  background: #f7f4ed;
+}
+
+.debug-tile figcaption {
+  padding: 7px;
+  color: #55514a;
+  font-size: 11px;
 }

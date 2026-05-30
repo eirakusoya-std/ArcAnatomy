@@ -1,21 +1,5 @@
 import type { CircleRole, ConstructionData } from './types';
 
-export function maskToSvgPath(mask: Uint8Array, width: number, height: number, cell = 2) {
-  const commands: string[] = [];
-  for (let y = 0; y < height; y += cell) {
-    let start = -1;
-    for (let x = 0; x <= width; x += cell) {
-      const filled = x < width && mask[y * width + x] === 1;
-      if (filled && start === -1) start = x;
-      if ((!filled || x >= width) && start !== -1) {
-        commands.push(`M ${start} ${y} H ${x} V ${Math.min(height, y + cell)} H ${start} Z`);
-        start = -1;
-      }
-    }
-  }
-  return commands.join(' ');
-}
-
 export function buildSvg(
   construction: ConstructionData,
   helperOpacity: number,
@@ -40,8 +24,8 @@ export function buildSvg(
         .filter((circle) => circle.visible && (roleVisibility[circle.role] ?? true))
         .map(
           (circle) => {
-            const stroke = circle.role === 'subtract' ? '#9b6b5d' : circle.role === 'add' ? '#747b84' : '#8b9099';
-            const dash = circle.role === 'helper' ? ' stroke-dasharray="4 5"' : '';
+            const stroke = circle.role === 'subtract' ? '#a34835' : circle.role === 'add' ? '#59616d' : circle.role === 'boundary' ? '#7a8594' : '#9ba0a8';
+            const dash = circle.role === 'subtract' ? ' stroke-dasharray="6 4"' : circle.role === 'helper' ? ' stroke-dasharray="4 5"' : '';
             return `<circle cx="${circle.centerX.toFixed(2)}" cy="${circle.centerY.toFixed(2)}" r="${circle.radius.toFixed(2)}" fill="none" stroke="${stroke}" stroke-width="1.4" vector-effect="non-scaling-stroke" opacity="${helperOpacity.toFixed(2)}"${dash} />`;
           },
         )
@@ -57,7 +41,10 @@ export function buildSvg(
           const start = polar(circle.centerX, circle.centerY, circle.radius, arc.startAngle);
           const end = polar(circle.centerX, circle.centerY, circle.radius, arc.endAngle);
           const sweep = ((arc.endAngle - arc.startAngle + 360) % 360) > 180 ? 1 : 0;
-          return `<path d="M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${circle.radius.toFixed(2)} ${circle.radius.toFixed(2)} 0 ${sweep} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}" fill="none" stroke="#5f6570" stroke-width="2.2" vector-effect="non-scaling-stroke" opacity="${Math.min(0.85, helperOpacity + 0.2).toFixed(2)}" />`;
+          const stroke = circle.role === 'subtract' ? '#b44732' : circle.usedInFinal ? '#252a31' : '#6f7680';
+          const width = circle.usedInFinal ? 3.1 : 2.1;
+          const dash = circle.role === 'subtract' ? ' stroke-dasharray="7 4"' : '';
+          return `<path d="M ${start.x.toFixed(2)} ${start.y.toFixed(2)} A ${circle.radius.toFixed(2)} ${circle.radius.toFixed(2)} 0 ${sweep} 1 ${end.x.toFixed(2)} ${end.y.toFixed(2)}" fill="none" stroke="${stroke}" stroke-width="${width}" vector-effect="non-scaling-stroke" opacity="${Math.min(0.92, helperOpacity + 0.25).toFixed(2)}"${dash} />`;
         })
         .join('\n')
     : '';
@@ -73,24 +60,26 @@ export function buildSvg(
 }
 
 function buildVectorSilhouette(construction: ConstructionData) {
-  const regionCircles = construction.circles.filter((circle) => circle.role === 'add' || circle.role === 'subtract');
+  const selectedLoops = construction.faces.filter((face) => face.selected && face.arcPieces.length > 0);
+  if (selectedLoops.length === 0) return '';
+  const paths = selectedLoops.map(arcLoopToPath).filter(Boolean).join('\n');
+  return `<path data-fill-mode="arc-loops" data-shape-expression="selected circular arcs -> closed arc loops -> fill inside loops" d="${paths}" fill="#111111" fill-rule="evenodd"/>`;
+}
 
-  if (regionCircles.length === 0) return '';
-
-  const orderedMarkup = regionCircles
-    .map(
-      (circle) =>
-        `<circle cx="${circle.centerX.toFixed(2)}" cy="${circle.centerY.toFixed(2)}" r="${circle.radius.toFixed(2)}" fill="${circle.role === 'add' ? 'white' : 'black'}" />`,
-    )
-    .join('\n');
-
-  return `<defs>
-    <mask id="circle-silhouette-mask" maskUnits="userSpaceOnUse" x="0" y="0" width="${construction.width}" height="${construction.height}">
-      <rect width="${construction.width}" height="${construction.height}" fill="black"/>
-      ${orderedMarkup}
-    </mask>
-  </defs>
-  <rect width="${construction.width}" height="${construction.height}" fill="#111111" mask="url(#circle-silhouette-mask)"/>`;
+function arcLoopToPath(face: ConstructionData['faces'][number]) {
+  if (face.arcPieces.length === 0) return '';
+  const first = face.arcPieces[0];
+  const commands = [`M ${first.startPoint.x.toFixed(2)} ${first.startPoint.y.toFixed(2)}`];
+  for (const piece of face.arcPieces) {
+    const span = piece.direction === 'ccw'
+      ? ((piece.endAngle - piece.startAngle) % 360 + 360) % 360
+      : ((piece.startAngle - piece.endAngle) % 360 + 360) % 360;
+    const largeArcFlag = span > 180 ? 1 : 0;
+    const sweepFlag = piece.direction === 'ccw' ? 1 : 0;
+    commands.push(`A ${piece.r.toFixed(2)} ${piece.r.toFixed(2)} 0 ${largeArcFlag} ${sweepFlag} ${piece.endPoint.x.toFixed(2)} ${piece.endPoint.y.toFixed(2)}`);
+  }
+  commands.push('Z');
+  return commands.join(' ');
 }
 
 export function downloadText(filename: string, content: string, mime: string) {

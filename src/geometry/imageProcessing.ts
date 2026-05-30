@@ -29,7 +29,10 @@ export function imageDataToAnalysis(
   const cleanedLines = majorityFilter(mask, width, height, edgeStrength);
   const cleaned = fillLineArtIfNeeded(cleanedLines, width, height);
   const edge = extractEdges(cleaned, width, height);
-  const contourPoints = sampleContour(edge, width, height, Math.max(1, Math.round(3 + edgeStrength)));
+  const rawContourPoints = extractOuterContour(cleaned, edge, width, height);
+  const smoothedContourPoints = smoothClosedPoints(rawContourPoints, Math.max(2, Math.round(3 + edgeStrength)));
+  const contourPoints = resampleClosedPolyline(smoothedContourPoints, Math.max(3, Math.round(Math.hypot(width, height) / 240)));
+  const contourSegments = splitContourSegments(contourPoints);
   const stats = computeStats(cleaned, width, height);
 
   return {
@@ -37,6 +40,9 @@ export function imageDataToAnalysis(
     height,
     mask: cleaned,
     edge,
+    rawContourPoints,
+    smoothedContourPoints,
+    contourSegments,
     contourPoints,
     centroid: stats.centroid,
     bounds: stats.bounds,
@@ -159,6 +165,182 @@ function sampleContour(edge: Uint8Array, width: number, height: number, step: nu
     }
   }
   return points;
+}
+
+function extractOuterContour(mask: Uint8Array, edge: Uint8Array, width: number, height: number): Point[] {
+  const start = findTopLeftEdge(edge, width, height);
+  if (!start) return sampleContour(edge, width, height, 1);
+
+  const directions = [
+    { x: 1, y: 0 },
+    { x: 1, y: 1 },
+    { x: 0, y: 1 },
+    { x: -1, y: 1 },
+    { x: -1, y: 0 },
+    { x: -1, y: -1 },
+    { x: 0, y: -1 },
+    { x: 1, y: -1 },
+  ];
+  const contour: Point[] = [];
+  let current = start;
+  let previousDirection = 4;
+  const maxSteps = width * height;
+
+  for (let step = 0; step < maxSteps; step += 1) {
+    contour.push({ x: current.x, y: current.y });
+    let found: Point | null = null;
+    let foundDirection = previousDirection;
+    for (let offset = 0; offset < directions.length; offset += 1) {
+      const directionIndex = (previousDirection + 6 + offset) % directions.length;
+      const direction = directions[directionIndex];
+      const next = { x: current.x + direction.x, y: current.y + direction.y };
+      if (next.x <= 0 || next.x >= width - 1 || next.y <= 0 || next.y >= height - 1) continue;
+      const i = next.y * width + next.x;
+      if (!edge[i]) continue;
+      found = next;
+      foundDirection = directionIndex;
+      break;
+    }
+    if (!found) break;
+    current = found;
+    previousDirection = foundDirection;
+    if (step > 12 && current.x === start.x && current.y === start.y) break;
+  }
+
+  if (contour.length < 16) return orderEdgePoints(sampleContour(edge, width, height, 1));
+  return removeNearDuplicatePoints(contour);
+}
+
+function findTopLeftEdge(edge: Uint8Array, width: number, height: number) {
+  for (let y = 1; y < height - 1; y += 1) {
+    for (let x = 1; x < width - 1; x += 1) {
+      if (edge[y * width + x]) return { x, y };
+    }
+  }
+  return null;
+}
+
+function orderEdgePoints(points: Point[]): Point[] {
+  if (points.length < 3) return points;
+  const remaining = [...points];
+  const ordered: Point[] = [remaining.shift() as Point];
+  while (remaining.length > 0) {
+    const current = ordered[ordered.length - 1];
+    let bestIndex = 0;
+    let bestDistance = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < remaining.length; i += 1) {
+      const d = Math.hypot(current.x - remaining[i].x, current.y - remaining[i].y);
+      if (d < bestDistance) {
+        bestDistance = d;
+        bestIndex = i;
+      }
+    }
+    ordered.push(remaining.splice(bestIndex, 1)[0]);
+  }
+  return ordered;
+}
+
+function smoothClosedPoints(points: Point[], radius: number): Point[] {
+  if (points.length < 3) return points;
+  const out: Point[] = [];
+  const r = Math.max(1, radius);
+  for (let i = 0; i < points.length; i += 1) {
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+    for (let offset = -r; offset <= r; offset += 1) {
+      const point = points[(i + offset + points.length) % points.length];
+      sumX += point.x;
+      sumY += point.y;
+      count += 1;
+    }
+    out.push({ x: sumX / count, y: sumY / count });
+  }
+  return out;
+}
+
+function resampleClosedPolyline(points: Point[], spacing: number): Point[] {
+  if (points.length < 2) return points;
+  const closed = [...points, points[0]];
+  const distances = [0];
+  for (let i = 1; i < closed.length; i += 1) {
+    distances[i] = distances[i - 1] + Math.hypot(closed[i].x - closed[i - 1].x, closed[i].y - closed[i - 1].y);
+  }
+  const total = distances[distances.length - 1];
+  const count = Math.max(24, Math.round(total / Math.max(1, spacing)));
+  const out: Point[] = [];
+  for (let sample = 0; sample < count; sample += 1) {
+    const target = (sample / count) * total;
+    let segment = 1;
+    while (segment < distances.length - 1 && distances[segment] < target) segment += 1;
+    const prevDistance = distances[segment - 1];
+    const nextDistance = distances[segment];
+    const t = nextDistance === prevDistance ? 0 : (target - prevDistance) / (nextDistance - prevDistance);
+    const a = closed[segment - 1];
+    const b = closed[segment];
+    out.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  }
+  return out;
+}
+
+function splitContourSegments(points: Point[]): number[][] {
+  if (points.length < 12) return [points.map((_, index) => index)];
+  const curvature = points.map((_, index) => {
+    const prev = points[(index - 3 + points.length) % points.length];
+    const current = points[index];
+    const next = points[(index + 3) % points.length];
+    const a = Math.atan2(current.y - prev.y, current.x - prev.x);
+    const b = Math.atan2(next.y - current.y, next.x - current.x);
+    return Math.abs(normalizeRadians(b - a));
+  });
+  const sorted = [...curvature].sort((a, b) => a - b);
+  const threshold = Math.max(0.32, sorted[Math.floor(sorted.length * 0.82)] ?? 0.32);
+  const breaks = curvature
+    .map((value, index) => ({ value, index }))
+    .filter(({ value }) => value >= threshold)
+    .sort((a, b) => b.value - a.value)
+    .map(({ index }) => index);
+  const minGap = Math.max(8, Math.round(points.length / 18));
+  const picked: number[] = [];
+  for (const index of breaks) {
+    if (picked.every((other) => circularIndexDistance(index, other, points.length) >= minGap)) picked.push(index);
+    if (picked.length >= 10) break;
+  }
+  if (picked.length < 2) return [points.map((_, index) => index)];
+  picked.sort((a, b) => a - b);
+  const segments: number[][] = [];
+  for (let i = 0; i < picked.length; i += 1) {
+    const start = picked[i];
+    const end = picked[(i + 1) % picked.length];
+    const segment: number[] = [];
+    let cursor = start;
+    while (cursor !== end) {
+      segment.push(cursor);
+      cursor = (cursor + 1) % points.length;
+      if (segment.length > points.length) break;
+    }
+    if (segment.length >= 6) segments.push(segment);
+  }
+  return segments.length ? segments : [points.map((_, index) => index)];
+}
+
+function removeNearDuplicatePoints(points: Point[]) {
+  return points.filter((point, index) => {
+    const previous = points[(index - 1 + points.length) % points.length];
+    return Math.hypot(point.x - previous.x, point.y - previous.y) > 0.5;
+  });
+}
+
+function circularIndexDistance(a: number, b: number, length: number) {
+  const d = Math.abs(a - b);
+  return Math.min(d, length - d);
+}
+
+function normalizeRadians(value: number) {
+  let angle = value;
+  while (angle > Math.PI) angle -= Math.PI * 2;
+  while (angle < -Math.PI) angle += Math.PI * 2;
+  return angle;
 }
 
 function computeStats(mask: Uint8Array, width: number, height: number) {

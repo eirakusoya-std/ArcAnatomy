@@ -1,10 +1,10 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Download, FileJson, ImageUp, Play, RefreshCw, Save, SlidersHorizontal } from 'lucide-react';
-import { generateCircleCandidates } from './geometry/circleFitting';
+import { generateCircleCandidatesWithDebug } from './geometry/circleFitting';
 import { buildConstruction } from './geometry/reconstruction';
 import { imageDataToAnalysis } from './geometry/imageProcessing';
 import { buildSvg, downloadText, triggerDownload } from './geometry/exporters';
-import type { CircleRole, ConstructionData, GeneratorSettings } from './geometry/types';
+import type { CircleDebugRow, CircleFittingDebugData, CircleRole, ConstructionData, GeneratorSettings } from './geometry/types';
 
 const defaultSettings: GeneratorSettings = {
   threshold: 118,
@@ -28,11 +28,27 @@ const defaultSettings: GeneratorSettings = {
   maxAddCircles: 8,
   maxSubtractCircles: 5,
   nmsDistance: 18,
+  contourFirstMode: true,
+  maxMainArcCircles: 6,
+  maxFillCircles: 1,
+  minArcLength: 34,
+  minContourSupport: 0.018,
+  largeRadiusPreference: 1.15,
+  interiorFillPenaltyWeight: 1.4,
+  targetContourCoverage: 0.72,
+  maxGoodRemovalRatio: 0.18,
 };
 
 interface ResultState {
   construction: ConstructionData;
   maskOverlayUrl: string;
+  debug: CircleFittingDebugData;
+  debugImages: DebugImage[];
+}
+
+interface DebugImage {
+  label: string;
+  url: string;
 }
 
 export function App() {
@@ -97,10 +113,14 @@ export function App() {
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const analysis = imageDataToAnalysis(imageData, settings.threshold, settings.blur, settings.edgeStrength);
-    const circles = generateCircleCandidates(analysis, settings);
+    const { circles, debug } = generateCircleCandidatesWithDebug(analysis, settings);
     const construction = buildConstruction(analysis, circles);
     const maskOverlayUrl = maskToOverlayDataUrl(analysis.mask, analysis.width, analysis.height);
-    setResult({ construction, maskOverlayUrl });
+    const debugImages = makeDebugImages(debug, construction, analysis.width, analysis.height);
+    const debugReport = makeDebugReport(construction, debug);
+    (window as Window & { __arcAnatomyDebug?: ReturnType<typeof makeDebugReport> }).__arcAnatomyDebug = debugReport;
+    console.info('Arc Anatomy debug', debugReport);
+    setResult({ construction, maskOverlayUrl, debug, debugImages });
   }
 
   function updateSetting<K extends keyof GeneratorSettings>(key: K, value: GeneratorSettings[K]) {
@@ -109,7 +129,7 @@ export function App() {
 
   function exportJson() {
     if (!result) return;
-    downloadText(`${imageName}-circle-construction.json`, JSON.stringify(result.construction, null, 2), 'application/json');
+    downloadText(`${imageName}-circle-construction.json`, JSON.stringify(makeDebugReport(result.construction, result.debug), null, 2), 'application/json');
   }
 
   function exportSvg() {
@@ -176,6 +196,15 @@ export function App() {
           <Range label="最大add円数" min={1} max={18} value={settings.maxAddCircles} onChange={(v) => updateSetting('maxAddCircles', v)} />
           <Range label="最大subtract円数" min={0} max={12} value={settings.maxSubtractCircles} onChange={(v) => updateSetting('maxSubtractCircles', v)} />
           <Range label="NMS距離" min={4} max={80} value={settings.nmsDistance} onChange={(v) => updateSetting('nmsDistance', v)} />
+          <Toggle label="contour-first mode" checked={settings.contourFirstMode} onChange={(v) => updateSetting('contourFirstMode', v)} />
+          <Range label="主円弧の最大数" min={1} max={12} value={settings.maxMainArcCircles} onChange={(v) => updateSetting('maxMainArcCircles', v)} />
+          <Range label="fill円の最大数" min={0} max={4} value={settings.maxFillCircles} onChange={(v) => updateSetting('maxFillCircles', v)} />
+          <Range label="最小円弧長" min={10} max={180} value={settings.minArcLength} onChange={(v) => updateSetting('minArcLength', v)} />
+          <Range label="最小輪郭支持" min={0.005} max={0.12} step={0.005} value={settings.minContourSupport} onChange={(v) => updateSetting('minContourSupport', v)} />
+          <Range label="大半径優先度" min={0.2} max={2} step={0.05} value={settings.largeRadiusPreference} onChange={(v) => updateSetting('largeRadiusPreference', v)} />
+          <Range label="内部fill減点" min={0} max={3} step={0.05} value={settings.interiorFillPenaltyWeight} onChange={(v) => updateSetting('interiorFillPenaltyWeight', v)} />
+          <Range label="目標輪郭カバー" min={0.3} max={0.95} step={0.01} value={settings.targetContourCoverage} onChange={(v) => updateSetting('targetContourCoverage', v)} />
+          <Range label="削り許容量" min={0.02} max={0.4} step={0.01} value={settings.maxGoodRemovalRatio} onChange={(v) => updateSetting('maxGoodRemovalRatio', v)} />
           <Range label="補助円の濃さ" min={0} max={1} step={0.01} value={settings.helperOpacity} onChange={(v) => updateSetting('helperOpacity', v)} />
           <Toggle label="補助円を表示" checked={settings.showHelpers} onChange={(v) => updateSetting('showHelpers', v)} />
           <Toggle label="add 円を表示" checked={settings.showAddCircles} onChange={(v) => updateSetting('showAddCircles', v)} />
@@ -250,6 +279,97 @@ export function App() {
             ))}
           </div>
         </section>
+
+        <section className="control-group">
+          <h2>デバッグ画像</h2>
+          <div className="debug-grid">
+            {result?.debugImages.map((image) => (
+              <figure className="debug-tile" key={image.label}>
+                <img src={image.url} alt={image.label} />
+                <figcaption>{image.label}</figcaption>
+              </figure>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Shape Optimization Debug</h2>
+          <div className="debug-table">
+            {result && (
+              <>
+                <code>initial={result.debug.shapeOptimization.initialScore.toFixed(3)} optimized={result.debug.shapeOptimization.optimizedScore.toFixed(3)} iterations={result.debug.shapeOptimization.iterations} flips={result.debug.shapeOptimization.acceptedRoleFlips.length} additions={result.debug.shapeOptimization.acceptedAdditions} removals={result.debug.shapeOptimization.acceptedRemovals}</code>
+                {result.debug.shapeOptimization.acceptedRoleFlips.slice(0, 16).map((flip) => (
+                  <code key={`${flip.circleId}-${flip.to}-${flip.score}`}>{flip.circleId}: {flip.from} -&gt; {flip.to} delta={flip.delta.toFixed(3)} score={flip.score.toFixed(3)}</code>
+                ))}
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>selected circle debug</h2>
+          <div className="debug-table">
+            {result && [...result.debug.selectedAddCircles, ...result.debug.selectedSubtractCircles].map((circle) => (
+              <code key={`${circle.role}-${circle.id}`}>{formatCircleDebug(circle)}</code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Arc Candidates</h2>
+          <div className="debug-table">
+            {result?.debug.arcCandidates.slice(0, 18).map((circle) => (
+              <code key={circle.id}>{formatCandidateDebug(circle)}</code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Selection Steps</h2>
+          <div className="debug-table">
+            {result?.debug.selectionSteps.map((step) => (
+              <code key={step.step}>#{step.step} {step.candidateId} gain={step.gain.toFixed(3)} new={step.newlyCoveredContourCount} coverage={(step.totalContourCoverage * 100).toFixed(1)}% {step.reason}</code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Arc Loop Debug</h2>
+          <div className="debug-table">
+            {result && (
+              <code>
+                selectedArcs={result.construction.splitArcPieces.filter((piece) => piece.selectedAsBoundary).length} snappedNodes={result.construction.faceDebug.graphNodesCount} graphEdges={result.construction.faceDebug.graphEdgesCount} closedLoops={result.construction.faceDebug.closedLoopsCount} selectedFillLoops={result.construction.faceDebug.selectedFacesCount} fallback={String(result.construction.faceDebug.fallbackUsed)} reason={result.construction.faceDebug.emptyReason ?? '-'}
+              </code>
+            )}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Contour Ordered Arc Chain</h2>
+          <div className="debug-table">
+            {result?.construction.circles.filter((circle) => circle.id.startsWith('OC')).map((circle, index) => (
+              <code key={circle.id}>#{index + 1} {circle.id} cx={circle.centerX.toFixed(1)} cy={circle.centerY.toFixed(1)} r={circle.radius.toFixed(1)} start={circle.startAngle.toFixed(1)} end={circle.endAngle.toFixed(1)} fitError={circle.fitError.toFixed(2)} arcLength={circle.arcLength.toFixed(1)} support={circle.contourSupport.toFixed(2)} selected</code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Loop Table</h2>
+          <div className="debug-table">
+            {result?.construction.faces.map((face) => (
+              <code key={face.id}>{face.id} source={face.source} closed=true area={face.area.toFixed(1)} centroid=({face.centroid.x.toFixed(1)}, {face.centroid.y.toFixed(1)}) edges={face.numEdges} insideMaskScore={face.insideMaskScore.toFixed(2)} depth={face.nestingDepth ?? 0} parent={face.parentFaceId ?? '-'} {face.selected ? 'selected' : `rejected:${face.rejectionReason}`}</code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Rejected Arc Pieces</h2>
+          <div className="debug-table">
+            {result?.construction.splitArcPieces.filter((piece) => !piece.selectedAsBoundary).slice(0, 32).map((piece) => (
+              <code key={piece.id}>{piece.id} parentArc={piece.parentArcId} parentCircle={piece.parentCircleId} reason={piece.rejectionReason ?? 'not_boundary_piece'}</code>
+            ))}
+          </div>
+        </section>
       </aside>
     </main>
   );
@@ -284,6 +404,279 @@ function maskToOverlayDataUrl(mask: Uint8Array, width: number, height: number) {
   }
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL('image/png');
+}
+
+function makeDebugImages(debug: CircleFittingDebugData, construction: ConstructionData, width: number, height: number): DebugImage[] {
+  return [
+    { label: 'cleaned mask', url: maskToDebugDataUrl(debug.cleanedMask, width, height, '#111111') },
+    { label: 'extracted contour', url: maskToDebugDataUrl(debug.extractedContour, width, height, '#0f766e') },
+    { label: 'contour image', url: maskToDebugDataUrl(debug.contourImage, width, height, '#1d4ed8') },
+    { label: 'smoothed contour', url: maskToDebugDataUrl(debug.smoothedContour, width, height, '#7c3aed') },
+    { label: 'contour segments', url: segmentMaskToDebugDataUrl(debug.contourSegments, width, height) },
+    { label: 'simplified contour', url: maskToDebugDataUrl(debug.simplifiedContour, width, height, '#dc2626') },
+    { label: 'distance transform image', url: scalarToDebugDataUrl(debug.distanceTransform, width, height) },
+    { label: 'all raw circle candidates', url: circlesToDebugDataUrl(debug.allRawCircleCandidates, width, height) },
+    { label: 'selected add circles', url: circlesToDebugDataUrl(debug.selectedAddCircles, width, height) },
+    { label: 'selected subtract circles', url: circlesToDebugDataUrl(debug.selectedSubtractCircles, width, height) },
+    { label: 'selected raw arcs', url: graphEdgesToDataUrl(construction.arcs.filter((arc) => arc.usedInSilhouette).map((arc) => {
+      const circle = construction.circles.find((item) => item.id === arc.circleId);
+      return circle ? sampleDebugArc(circle.centerX, circle.centerY, circle.radius, arc.startAngle, arc.endAngle) : [];
+    }), width, height) },
+    { label: 'circle-circle intersections', url: intersectionsToDataUrl(construction.intersections, width, height) },
+    { label: 'split arc pieces', url: graphEdgesToDataUrl(construction.splitArcPieces.map((piece) => piece.points), width, height) },
+    { label: 'valid boundary arc pieces', url: graphEdgesToDataUrl(construction.splitArcPieces.filter((piece) => piece.selectedAsBoundary).map((piece) => piece.points), width, height) },
+    { label: 'rejected arc pieces', url: graphEdgesToDataUrl(construction.splitArcPieces.filter((piece) => !piece.selectedAsBoundary).map((piece) => piece.points), width, height) },
+    { label: 'planar graph nodes', url: graphNodesToDataUrl(construction.graphNodes, width, height) },
+    { label: 'planar graph edges', url: graphEdgesToDataUrl(construction.graphEdges.map((edge) => edge.points), width, height) },
+    { label: 'face candidates', url: facesToDataUrl(construction.faces, width, height, false) },
+    { label: 'selected faces', url: facesToDataUrl(construction.faces, width, height, true) },
+    { label: 'contour coverage', url: coverageMaskToDataUrl(debug.contourImage, debug.contourCoverageImage, width, height) },
+    { label: 'final geometry before subtract', url: maskToDebugDataUrl(debug.finalGeometryBeforeSubtract, width, height, '#111111') },
+    { label: 'overfill region', url: maskToDebugDataUrl(debug.overfillRegion, width, height, '#e11d48') },
+    { label: 'false positive overlay', url: maskToDebugDataUrl(debug.falsePositiveRegion, width, height, '#e11d48') },
+    { label: 'false negative overlay', url: maskToDebugDataUrl(debug.falseNegativeRegion, width, height, '#2563eb') },
+    { label: 'final geometry after subtract', url: maskToDebugDataUrl(debug.finalGeometryAfterSubtract, width, height, '#111111') },
+  ];
+}
+
+function intersectionsToDataUrl(points: Array<{ x: number; y: number }>, width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#db2777';
+  for (const point of points) {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function graphNodesToDataUrl(nodes: Array<{ x: number; y: number }>, width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = '#111111';
+  for (const node of nodes) ctx.fillRect(node.x - 3, node.y - 3, 6, 6);
+  return canvas.toDataURL('image/png');
+}
+
+function graphEdgesToDataUrl(paths: Array<Array<{ x: number; y: number }>>, width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  ctx.strokeStyle = '#2563eb';
+  ctx.lineWidth = 2;
+  for (const points of paths) {
+    if (points.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    for (const point of points.slice(1)) ctx.lineTo(point.x, point.y);
+    ctx.stroke();
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function sampleDebugArc(cx: number, cy: number, radius: number, startAngle: number, endAngle: number) {
+  const span = ((endAngle - startAngle) % 360 + 360) % 360 || 360;
+  const steps = Math.max(8, Math.ceil((span / 360) * Math.PI * 2 * radius / 8));
+  const points: Array<{ x: number; y: number }> = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const angle = startAngle + (span * i) / steps;
+    const radians = (angle * Math.PI) / 180;
+    points.push({ x: cx + Math.cos(radians) * radius, y: cy + Math.sin(radians) * radius });
+  }
+  return points;
+}
+
+function facesToDataUrl(
+  faces: Array<{ polygon: Array<{ x: number; y: number }>; selected: boolean; samplePoints?: Array<{ x: number; y: number }> }>,
+  width: number,
+  height: number,
+  selectedOnly: boolean,
+) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  for (const face of faces) {
+    if (selectedOnly && !face.selected) continue;
+    ctx.fillStyle = face.selected ? 'rgba(17, 17, 17, 0.82)' : 'rgba(220, 38, 38, 0.22)';
+    if (face.polygon.length >= 3) {
+      ctx.beginPath();
+      ctx.moveTo(face.polygon[0].x, face.polygon[0].y);
+      for (const point of face.polygon.slice(1)) ctx.lineTo(point.x, point.y);
+      ctx.closePath();
+      ctx.fill();
+      ctx.strokeStyle = face.selected ? '#111111' : '#dc2626';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.fillStyle = '#f59e0b';
+    for (const point of face.samplePoints ?? []) ctx.fillRect(point.x - 2, point.y - 2, 4, 4);
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function segmentMaskToDebugDataUrl(mask: Uint8Array, width: number, height: number) {
+  const colors = ['#2563eb', '#dc2626', '#16a34a'];
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const value = mask[y * width + x];
+      if (!value) continue;
+      ctx.fillStyle = colors[(value - 1) % colors.length];
+      ctx.fillRect(x, y, 2, 2);
+    }
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function coverageMaskToDataUrl(contour: Uint8Array, coverage: Uint8Array, width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  for (let i = 0; i < contour.length; i += 1) {
+    if (!contour[i]) continue;
+    const x = i % width;
+    const y = Math.floor(i / width);
+    ctx.fillStyle = coverage[i] ? '#16a34a' : '#dc2626';
+    ctx.fillRect(x, y, 2, 2);
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function maskToDebugDataUrl(mask: Uint8Array, width: number, height: number, color: string) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  ctx.fillStyle = color;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (mask[y * width + x]) ctx.fillRect(x, y, 1, 1);
+    }
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function scalarToDebugDataUrl(values: Float32Array, width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  const imageData = ctx.createImageData(width, height);
+  let max = 0;
+  for (const value of values) if (value < 1_000_000) max = Math.max(max, value);
+  for (let i = 0; i < values.length; i += 1) {
+    const value = max > 0 && values[i] < 1_000_000 ? Math.round((values[i] / max) * 255) : 0;
+    const offset = i * 4;
+    imageData.data[offset] = value;
+    imageData.data[offset + 1] = value;
+    imageData.data[offset + 2] = value;
+    imageData.data[offset + 3] = 255;
+  }
+  ctx.putImageData(imageData, 0, 0);
+  return canvas.toDataURL('image/png');
+}
+
+function circlesToDebugDataUrl(circles: CircleDebugRow[], width: number, height: number) {
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d') as CanvasRenderingContext2D;
+  ctx.fillStyle = '#f7f4ed';
+  ctx.fillRect(0, 0, width, height);
+  for (const circle of circles) {
+    ctx.beginPath();
+    ctx.arc(circle.cx, circle.cy, circle.r, 0, Math.PI * 2);
+    ctx.strokeStyle = circle.role === 'subtract' ? '#dc2626' : circle.role === 'boundary' ? '#2563eb' : '#111111';
+    ctx.lineWidth = circle.usedInFinal ? 2 : 1;
+    ctx.stroke();
+  }
+  return canvas.toDataURL('image/png');
+}
+
+function makeDebugReport(construction: ConstructionData, debug: CircleFittingDebugData) {
+  return {
+    construction,
+    debug: {
+      images: {
+        cleanedMask: maskStats(debug.cleanedMask),
+        extractedContour: maskStats(debug.extractedContour),
+        contourImage: maskStats(debug.contourImage),
+        smoothedContour: maskStats(debug.smoothedContour),
+        contourSegments: maskStats(debug.contourSegments),
+        simplifiedContour: maskStats(debug.simplifiedContour),
+        distanceTransform: scalarStats(debug.distanceTransform),
+        finalGeometryBeforeSubtract: maskStats(debug.finalGeometryBeforeSubtract),
+        overfillRegion: maskStats(debug.overfillRegion),
+        falsePositiveRegion: maskStats(debug.falsePositiveRegion),
+        falseNegativeRegion: maskStats(debug.falseNegativeRegion),
+        finalGeometryAfterSubtract: maskStats(debug.finalGeometryAfterSubtract),
+      },
+      allRawCircleCandidates: debug.allRawCircleCandidates,
+      arcCandidates: debug.arcCandidates,
+      fillCandidates: debug.fillCandidates,
+      selectedAddCircles: debug.selectedAddCircles,
+      selectedSubtractCircles: debug.selectedSubtractCircles,
+      rejectedCandidates: debug.rejectedCandidates,
+      selectionSteps: debug.selectionSteps,
+      intersections: construction.intersections,
+      splitArcPieces: construction.splitArcPieces,
+      graphNodes: construction.graphNodes,
+      graphEdges: construction.graphEdges,
+      faces: construction.faces,
+      shapeOptimization: debug.shapeOptimization,
+    },
+  };
+}
+
+function maskStats(mask: Uint8Array) {
+  let filled = 0;
+  for (const value of mask) filled += value;
+  return { filledPixels: filled };
+}
+
+function scalarStats(values: Float32Array) {
+  let max = 0;
+  let nonZero = 0;
+  for (const value of values) {
+    if (value > 0 && value < 1_000_000) {
+      nonZero += 1;
+      max = Math.max(max, value);
+    }
+  }
+  return { nonZeroPixels: nonZero, max };
+}
+
+function formatCircleDebug(circle: CircleDebugRow) {
+  return `${circle.id} ${circle.initialRole ?? '-'}->${circle.finalRole ?? circle.role} cx=${circle.cx.toFixed(1)} cy=${circle.cy.toFixed(1)} r=${circle.r.toFixed(1)} angle=${circle.startAngle.toFixed(0)}-${circle.endAngle.toFixed(0)} arc=${circle.arcLength.toFixed(1)} fit=${circle.fitError.toFixed(2)} support=${circle.contourSupport.toFixed(3)} boundary=${circle.boundarySupport.toFixed(3)} contribution=${(circle.scoreContribution ?? 0).toFixed(3)} changed=${Boolean(circle.changedInOptimization)} used=${circle.usedInFinal} reason=${circle.rejectionReason ?? 'selected'}`;
+}
+
+function formatCandidateDebug(circle: CircleDebugRow) {
+  return `${circle.id} ${circle.source}/${circle.candidateKind} cx=${circle.cx.toFixed(1)} cy=${circle.cy.toFixed(1)} r=${circle.r.toFixed(1)} start=${circle.startAngle.toFixed(0)} end=${circle.endAngle.toFixed(0)} arc=${circle.arcLength.toFixed(1)} fit=${circle.fitError.toFixed(2)} support=${circle.contourSupport.toFixed(3)} covered=${circle.coveredContourCount} score=${circle.score.toFixed(3)} ${circle.rejectionReason ?? 'available'}`;
 }
 
 function Range(props: { label: string; min: number; max: number; value: number; step?: number; onChange: (value: number) => void }) {
