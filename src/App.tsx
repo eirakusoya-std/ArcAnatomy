@@ -1,6 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Download, FileJson, ImageUp, Play, RefreshCw, Save, SlidersHorizontal } from 'lucide-react';
-import { generateCircleCandidatesWithDebug } from './geometry/circleFitting';
 import { buildConstruction } from './geometry/reconstruction';
 import { imageDataToAnalysis } from './geometry/imageProcessing';
 import { buildSvg, downloadText, triggerDownload } from './geometry/exporters';
@@ -71,7 +70,7 @@ export function App() {
   }, [imageUrl]);
 
   const usedCircles = useMemo(
-    () => result?.construction.circles.filter((circle) => circle.role !== 'candidate') ?? [],
+    () => result?.construction.circles.filter((circle) => circle.visible && circle.role !== 'candidate') ?? [],
     [result],
   );
   const previewSvg = useMemo(() => {
@@ -102,7 +101,7 @@ export function App() {
     const image = await loadImage(imageUrl);
     imageRef.current = image;
     const canvas = canvasRef.current;
-    const maxSide = 860;
+    const maxSide = 720;
     const scale = Math.min(1, maxSide / Math.max(image.width, image.height));
     canvas.width = Math.max(1, Math.round(image.width * scale));
     canvas.height = Math.max(1, Math.round(image.height * scale));
@@ -113,13 +112,18 @@ export function App() {
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const analysis = imageDataToAnalysis(imageData, settings.threshold, settings.blur, settings.edgeStrength);
-    const { circles, debug } = generateCircleCandidatesWithDebug(analysis, settings);
-    const construction = buildConstruction(analysis, circles);
+    const debug = makeLightweightDebug(analysis);
+    const construction = buildConstruction(analysis, []);
     const maskOverlayUrl = maskToOverlayDataUrl(analysis.mask, analysis.width, analysis.height);
-    const debugImages = makeDebugImages(debug, construction, analysis.width, analysis.height);
+    const debugImages = makeLightweightDebugImages(debug, construction, analysis.width, analysis.height);
     const debugReport = makeDebugReport(construction, debug);
     (window as Window & { __arcAnatomyDebug?: ReturnType<typeof makeDebugReport> }).__arcAnatomyDebug = debugReport;
-    console.info('Arc Anatomy debug', debugReport);
+    console.info('Arc Anatomy debug summary', {
+      circles: construction.circles.length,
+      visibleCircles: construction.circles.filter((circle) => circle.visible).length,
+      arcs: construction.arcs.length,
+      loops: construction.faces.length,
+    });
     setResult({ construction, maskOverlayUrl, debug, debugImages });
   }
 
@@ -221,7 +225,7 @@ export function App() {
       <section className="preview-stage">
         <div className="preview-toolbar">
           <span>{imageName}</span>
-          <span>{result ? `${result.construction.circles.length} circles / ${result.construction.arcs.length} arcs` : 'ready'}</span>
+          <span>{result ? `${result.construction.circles.filter((circle) => circle.visible).length} visible circles / ${result.construction.arcs.length} arcs` : 'ready'}</span>
         </div>
         <div className="artboard">
           {result ? (
@@ -345,6 +349,20 @@ export function App() {
         </section>
 
         <section className="control-group">
+          <h2>Redundancy Debug</h2>
+          <div className="debug-table">
+            {result && (
+              <>
+                <code>raw={result.construction.faceDebug.rawCandidatesCount ?? 0} afterNms={result.construction.faceDebug.candidatesAfterNms ?? 0} beforeClustering={result.construction.faceDebug.selectedBeforeClustering ?? 0} afterClustering={result.construction.faceDebug.selectedAfterClustering ?? 0} suppressed={result.construction.faceDebug.suppressedCandidates ?? 0} mergedClusters={result.construction.faceDebug.mergedClusters ?? 0}</code>
+                {result.construction.circles.filter((circle) => circle.id.startsWith('OC') && (circle.selectedStep ?? 1) > 0).slice(0, 18).map((circle) => (
+                  <code key={`cluster-${circle.id}`}>cluster={circle.id} representative={circle.id} cx={circle.centerX.toFixed(1)} cy={circle.centerY.toFixed(1)} r={circle.radius.toFixed(1)} score={circle.score.toFixed(2)} segment={circle.selectedStep ?? '-'} reason=representative_after_redundancy_nms</code>
+                ))}
+              </>
+            )}
+          </div>
+        </section>
+
+        <section className="control-group">
           <h2>Contour Ordered Arc Chain</h2>
           <div className="debug-table">
             {result?.construction.circles.filter((circle) => circle.id.startsWith('OC')).map((circle, index) => (
@@ -404,6 +422,80 @@ function maskToOverlayDataUrl(mask: Uint8Array, width: number, height: number) {
   }
   ctx.putImageData(imageData, 0, 0);
   return canvas.toDataURL('image/png');
+}
+
+function makeLightweightDebug(analysis: ReturnType<typeof imageDataToAnalysis>): CircleFittingDebugData {
+  const contourMask = pointsToMask(analysis.contourPoints, analysis.width, analysis.height);
+  const segmentMask = segmentsToMask(analysis.contourPoints, analysis.contourSegments, analysis.width, analysis.height);
+  const emptyMask = new Uint8Array(analysis.width * analysis.height);
+  return {
+    cleanedMask: analysis.mask,
+    extractedContour: analysis.edge,
+    contourImage: contourMask,
+    smoothedContour: contourMask,
+    contourSegments: segmentMask,
+    simplifiedContour: contourMask,
+    distanceTransform: new Float32Array(analysis.width * analysis.height),
+    allRawCircleCandidates: [],
+    arcCandidates: [],
+    fillCandidates: [],
+    selectedAddCircles: [],
+    selectedSubtractCircles: [],
+    rejectedCandidates: [],
+    contourCoverage: contourMask,
+    contourCoverageImage: contourMask,
+    finalGeometryBeforeSubtract: emptyMask,
+    overfillRegion: emptyMask,
+    falsePositiveRegion: emptyMask,
+    falseNegativeRegion: emptyMask,
+    finalGeometryAfterSubtract: emptyMask,
+    shapeOptimization: {
+      initialAddCircleIds: [],
+      initialSubtractCircleIds: [],
+      optimizedAddCircleIds: [],
+      optimizedSubtractCircleIds: [],
+      initialScore: 0,
+      optimizedScore: 0,
+      iterations: 0,
+      acceptedRoleFlips: [],
+      acceptedAdditions: 0,
+      acceptedRemovals: 0,
+    },
+    selectionSteps: [],
+  };
+}
+
+function makeLightweightDebugImages(debug: CircleFittingDebugData, construction: ConstructionData, width: number, height: number): DebugImage[] {
+  return [
+    { label: 'cleaned mask', url: maskToDebugDataUrl(debug.cleanedMask, width, height, '#111111') },
+    { label: 'extracted contour', url: maskToDebugDataUrl(debug.extractedContour, width, height, '#0f766e') },
+    { label: 'contour segments', url: segmentMaskToDebugDataUrl(debug.contourSegments, width, height) },
+    { label: 'selected faces', url: facesToDataUrl(construction.faces, width, height, true) },
+  ];
+}
+
+function pointsToMask(points: Array<{ x: number; y: number }>, width: number, height: number) {
+  const mask = new Uint8Array(width * height);
+  for (const point of points) {
+    const x = Math.round(point.x);
+    const y = Math.round(point.y);
+    if (x >= 0 && x < width && y >= 0 && y < height) mask[y * width + x] = 1;
+  }
+  return mask;
+}
+
+function segmentsToMask(points: Array<{ x: number; y: number }>, segments: number[][], width: number, height: number) {
+  const mask = new Uint8Array(width * height);
+  segments.forEach((segment, segmentIndex) => {
+    for (const index of segment) {
+      const point = points[index];
+      if (!point) continue;
+      const x = Math.round(point.x);
+      const y = Math.round(point.y);
+      if (x >= 0 && x < width && y >= 0 && y < height) mask[y * width + x] = (segmentIndex % 3) + 1;
+    }
+  });
+  return mask;
 }
 
 function makeDebugImages(debug: CircleFittingDebugData, construction: ConstructionData, width: number, height: number): DebugImage[] {

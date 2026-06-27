@@ -157,6 +157,12 @@ export interface FaceDebugSummary {
   closedLoopsCount: number;
   faceCandidatesCount: number;
   selectedFacesCount: number;
+  rawCandidatesCount?: number;
+  candidatesAfterNms?: number;
+  selectedBeforeClustering?: number;
+  selectedAfterClustering?: number;
+  suppressedCandidates?: number;
+  mergedClusters?: number;
   fallbackUsed: boolean;
   emptyReason?: 'no_closed_loops_found' | 'all_faces_rejected_by_inside_score' | 'boundary_arcs_do_not_form_regions' | 'mask_sampling_failed';
 }

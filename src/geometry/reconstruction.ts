@@ -54,6 +54,9 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
   const graphNodes: ArcGraphNode[] = [];
   const graphEdges: ArcGraphEdge[] = [];
   const faces: FaceCandidate[] = [];
+  let rawCandidatesCount = 0;
+  let suppressedCandidates = 0;
+  let mergedClusters = 0;
   const sourceLoops = analysis.contourLoops.length
     ? analysis.contourLoops
     : [{ id: 'component-1', points: analysis.contourPoints, segments: analysis.contourSegments, bounds: analysis.bounds, area: analysis.mask.reduce((sum, value) => sum + value, 0) }];
@@ -61,11 +64,14 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
   sourceLoops.forEach((loop, loopIndex) => {
     const prefix = `L${loopIndex + 1}`;
     const segments = makeContourArcSegments(loop.points, loop.segments);
+    const rawCandidates = fitContourArcCandidates(loop.points, segments);
+    const mergedCandidates = mergeRedundantContourCandidates(loop.points, rawCandidates);
+    rawCandidatesCount += rawCandidates.length;
+    suppressedCandidates += rawCandidates.length - mergedCandidates.length;
+    mergedClusters += mergedCandidates.filter((candidate) => candidate.memberCount > 1).length;
     const arcPieces: ArcLoopSegment[] = [];
-    segments.forEach((indices, segmentIndex) => {
-      const points = pointsForContourSegment(loop.points, indices);
-      if (points.length < 3) return;
-      const fit = fitCircleToPoints(points) ?? fallbackCircleForPoints(points);
+    mergedCandidates.forEach((candidate, segmentIndex) => {
+      const { indices, points, fit, memberCount } = candidate;
       const startPoint = points[0];
       const endPoint = points[points.length - 1];
       const startAngle = pointAngleFromCenter(startPoint, fit.cx, fit.cy);
@@ -98,9 +104,10 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
         coveredContourIndices: indices,
         maskCoverage: 0,
         outsidePenalty: fit.error,
-        score: Math.max(0, 1 - fit.error / Math.max(1, fit.r)),
+        score: Math.max(0, 1 - fit.error / Math.max(1, fit.r)) + memberCount * 0.02,
         source: 'contour_fit',
         candidateKind: 'arc',
+        selectedStep: segmentIndex + 1,
         equation: `(x - ${fit.cx.toFixed(1)})^2 + (y - ${fit.cy.toFixed(1)})^2 = ${fit.r.toFixed(1)}^2`,
       };
       contourCircles.push(circle);
@@ -192,6 +199,7 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
     ...circle,
     role: circle.role === 'candidate' ? 'helper' as const : circle.role,
     usedInFinal: false,
+    visible: false,
   }));
   const faceDebug: FaceDebugSummary = {
     totalArcPieces: splitArcPieces.length,
@@ -201,11 +209,18 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
     closedLoopsCount: faces.length,
     faceCandidatesCount: faces.length,
     selectedFacesCount: faces.filter((face) => face.selected).length,
+    rawCandidatesCount,
+    candidatesAfterNms: splitArcPieces.length,
+    selectedBeforeClustering: rawCandidatesCount,
+    selectedAfterClustering: splitArcPieces.length,
+    suppressedCandidates,
+    mergedClusters,
     fallbackUsed: false,
     emptyReason: faces.some((face) => face.selected) ? undefined : 'mask_sampling_failed',
   };
+  const visibleCircles = suppressNearDuplicateCircleVisibility([...contourCircles, ...helperOnlyCircles]);
   return {
-    circles: [...contourCircles, ...helperOnlyCircles],
+    circles: visibleCircles,
     arcs,
     intersections: [] as ArcIntersection[],
     splitArcPieces,
@@ -214,6 +229,57 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
     faces,
     faceDebug,
   };
+}
+
+function suppressNearDuplicateCircleVisibility(circles: CircleSpec[]) {
+  const sorted = [...circles].sort((a, b) => circleKeepPriority(b) - circleKeepPriority(a));
+  const kept: CircleSpec[] = [];
+  const hidden = new Set<string>();
+
+  for (const circle of sorted) {
+    const duplicate = kept.find((other) => areNearDuplicateCircles(circle, other));
+    if (duplicate) {
+      hidden.add(circle.id);
+      continue;
+    }
+    kept.push(circle);
+  }
+
+  return limitVisibleBoundaryCircles(circles.map((circle) => hidden.has(circle.id) ? { ...circle, visible: false } : circle));
+}
+
+function limitVisibleBoundaryCircles(circles: CircleSpec[]) {
+  const visibleBoundary = circles
+    .filter((circle) => circle.visible && circle.role === 'boundary')
+    .sort((a, b) => circleKeepPriority(b) - circleKeepPriority(a));
+  const keep = new Set(visibleBoundary.slice(0, 6).map((circle) => circle.id));
+  return circles.map((circle) => {
+    if (circle.role !== 'boundary' || !circle.visible) return circle;
+    return keep.has(circle.id) ? circle : { ...circle, visible: false };
+  });
+}
+
+function circleKeepPriority(circle: CircleSpec) {
+  const finalWeight = circle.usedInFinal ? 10000 : 0;
+  const roleWeight = circle.role === 'boundary' ? 2000 : circle.role === 'helper' ? 400 : 800;
+  const supportWeight = circle.contourSupport * 1000 + circle.arcLength * 0.8;
+  const errorPenalty = circle.fitError * 20;
+  return finalWeight + roleWeight + supportWeight - errorPenalty;
+}
+
+function areNearDuplicateCircles(a: CircleSpec, b: CircleSpec) {
+  const minRadius = Math.max(1, Math.min(a.radius, b.radius));
+  const centerDistance = Math.hypot(a.centerX - b.centerX, a.centerY - b.centerY);
+  const radiusDelta = Math.abs(a.radius - b.radius);
+  const helperPair = !a.usedInFinal || !b.usedInFinal;
+  const centerTolerance = Math.max(helperPair ? 24 : 20, minRadius * (helperPair ? 0.16 : 0.14));
+  const radiusTolerance = Math.max(helperPair ? 16 : 12, minRadius * (helperPair ? 0.14 : 0.12));
+  const veryCloseCenter = centerDistance <= Math.max(helperPair ? 10 : 8, minRadius * (helperPair ? 0.08 : 0.06));
+  const almostSameRadius = radiusDelta <= Math.max(helperPair ? 8 : 4, minRadius * (helperPair ? 0.08 : 0.045));
+  const overlappingSimilarCircle = centerDistance <= minRadius * 0.5 && radiusDelta <= minRadius * 0.28;
+  return (centerDistance <= centerTolerance && radiusDelta <= radiusTolerance)
+    || (veryCloseCenter && almostSameRadius)
+    || overlappingSimilarCircle;
 }
 
 function makeContourArcSegments(contour: Point[], contourSegments: number[][]) {
@@ -237,6 +303,89 @@ function makeContourArcSegments(contour: Point[], contourSegments: number[][]) {
     }
   }
   return out.length >= 6 ? out : chunkContourIndices(contour.length, targetSegmentCount);
+}
+
+interface FittedContourCandidate {
+  indices: number[];
+  points: Point[];
+  fit: { cx: number; cy: number; r: number; error: number };
+  memberCount: number;
+}
+
+function fitContourArcCandidates(contour: Point[], segments: number[][]): FittedContourCandidate[] {
+  return segments
+    .map((indices) => {
+      const points = pointsForContourSegment(contour, indices);
+      if (points.length < 3) return undefined;
+      return {
+        indices,
+        points,
+        fit: fitCircleToPoints(points) ?? fallbackCircleForPoints(points),
+        memberCount: 1,
+      };
+    })
+    .filter((candidate): candidate is FittedContourCandidate => Boolean(candidate));
+}
+
+function mergeRedundantContourCandidates(contour: Point[], candidates: FittedContourCandidate[]) {
+  let current = candidates;
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const merged: FittedContourCandidate[] = [];
+    for (let i = 0; i < current.length; i += 1) {
+      const a = current[i];
+      const b = current[i + 1];
+      if (b) {
+        const candidate = tryMergeContourCandidates(contour, a, b);
+        if (candidate) {
+          merged.push(candidate);
+          i += 1;
+          changed = true;
+          continue;
+        }
+      }
+      merged.push(a);
+    }
+    current = merged;
+  }
+  return current;
+}
+
+function tryMergeContourCandidates(contour: Point[], a: FittedContourCandidate, b: FittedContourCandidate): FittedContourCandidate | undefined {
+  if (!areRedundantContourFits(a.fit, b.fit)) return undefined;
+  const indices = mergeContourIndices(a.indices, b.indices, contour.length);
+  const points = pointsForContourSegment(contour, indices);
+  const fit = fitCircleToPoints(points) ?? fallbackCircleForPoints(points);
+  const previousError = Math.max(a.fit.error, b.fit.error);
+  const allowedError = Math.max(0.85, previousError * 1.9);
+  if (fit.error > allowedError) return undefined;
+  return {
+    indices,
+    points,
+    fit,
+    memberCount: a.memberCount + b.memberCount,
+  };
+}
+
+function areRedundantContourFits(
+  a: { cx: number; cy: number; r: number },
+  b: { cx: number; cy: number; r: number },
+) {
+  const minRadius = Math.max(1, Math.min(a.r, b.r));
+  const centerDistance = Math.hypot(a.cx - b.cx, a.cy - b.cy);
+  const normalizedRadiusDifference = Math.abs(a.r - b.r) / minRadius;
+  return centerDistance <= Math.max(18, minRadius * 0.16)
+    && normalizedRadiusDifference <= 0.12;
+}
+
+function mergeContourIndices(a: number[], b: number[], contourLength: number) {
+  const out: number[] = [];
+  for (const index of [...a, ...b]) {
+    const normalized = ((index % contourLength) + contourLength) % contourLength;
+    if (out[out.length - 1] !== normalized) out.push(normalized);
+  }
+  return out;
 }
 
 function chunkContourIndices(length: number, count: number) {
