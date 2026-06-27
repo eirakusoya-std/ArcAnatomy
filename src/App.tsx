@@ -9,6 +9,17 @@ const defaultSettings: GeneratorSettings = {
   threshold: 118,
   blur: 2,
   edgeStrength: 2,
+  targetArcCount: 14,
+  arcMergeAggressiveness: 62,
+  visibleParentCircleLimit: 6,
+  minFittedRadius: 5,
+  maxFittedRadius: 520,
+  duplicateCenterTolerance: 18,
+  duplicateRadiusTolerance: 0.12,
+  loopClosureTolerance: 14,
+  minLoopInsideScore: 0.35,
+  minLoopArea: 24,
+  arcSampleSpacing: 5,
   maxCircles: 12,
   simplicity: 58,
   helperOpacity: 0.48,
@@ -113,7 +124,7 @@ export function App() {
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     const analysis = imageDataToAnalysis(imageData, settings.threshold, settings.blur, settings.edgeStrength);
     const debug = makeLightweightDebug(analysis);
-    const construction = buildConstruction(analysis, []);
+    const construction = buildConstruction(analysis, [], settings);
     const maskOverlayUrl = maskToOverlayDataUrl(analysis.mask, analysis.width, analysis.height);
     const debugImages = makeLightweightDebugImages(debug, construction, analysis.width, analysis.height);
     const debugReport = makeDebugReport(construction, debug);
@@ -193,28 +204,21 @@ export function App() {
 
         <section className="control-group">
           <h2>構成</h2>
-          <Range label="候補円数の上限" min={6} max={28} value={settings.maxCircles} onChange={(v) => updateSetting('maxCircles', v)} />
-          <Range label="忠実さ" min={0} max={100} value={settings.simplicity} onChange={(v) => updateSetting('simplicity', v)} />
-          <Range label="最小半径" min={2} max={60} value={settings.minRadius} onChange={(v) => updateSetting('minRadius', v)} />
-          <Range label="最大半径" min={20} max={420} value={settings.maxRadius} onChange={(v) => updateSetting('maxRadius', v)} />
-          <Range label="最大add円数" min={1} max={18} value={settings.maxAddCircles} onChange={(v) => updateSetting('maxAddCircles', v)} />
-          <Range label="最大subtract円数" min={0} max={12} value={settings.maxSubtractCircles} onChange={(v) => updateSetting('maxSubtractCircles', v)} />
-          <Range label="NMS距離" min={4} max={80} value={settings.nmsDistance} onChange={(v) => updateSetting('nmsDistance', v)} />
-          <Toggle label="contour-first mode" checked={settings.contourFirstMode} onChange={(v) => updateSetting('contourFirstMode', v)} />
-          <Range label="主円弧の最大数" min={1} max={12} value={settings.maxMainArcCircles} onChange={(v) => updateSetting('maxMainArcCircles', v)} />
-          <Range label="fill円の最大数" min={0} max={4} value={settings.maxFillCircles} onChange={(v) => updateSetting('maxFillCircles', v)} />
-          <Range label="最小円弧長" min={10} max={180} value={settings.minArcLength} onChange={(v) => updateSetting('minArcLength', v)} />
-          <Range label="最小輪郭支持" min={0.005} max={0.12} step={0.005} value={settings.minContourSupport} onChange={(v) => updateSetting('minContourSupport', v)} />
-          <Range label="大半径優先度" min={0.2} max={2} step={0.05} value={settings.largeRadiusPreference} onChange={(v) => updateSetting('largeRadiusPreference', v)} />
-          <Range label="内部fill減点" min={0} max={3} step={0.05} value={settings.interiorFillPenaltyWeight} onChange={(v) => updateSetting('interiorFillPenaltyWeight', v)} />
-          <Range label="目標輪郭カバー" min={0.3} max={0.95} step={0.01} value={settings.targetContourCoverage} onChange={(v) => updateSetting('targetContourCoverage', v)} />
-          <Range label="削り許容量" min={0.02} max={0.4} step={0.01} value={settings.maxGoodRemovalRatio} onChange={(v) => updateSetting('maxGoodRemovalRatio', v)} />
+          <Range label="目標円弧数" min={4} max={32} value={settings.targetArcCount} onChange={(v) => updateSetting('targetArcCount', v)} />
+          <Range label="円弧の統合強度" min={0} max={100} value={settings.arcMergeAggressiveness} onChange={(v) => updateSetting('arcMergeAggressiveness', v)} />
+          <Range label="表示する親円数" min={0} max={16} value={settings.visibleParentCircleLimit} onChange={(v) => updateSetting('visibleParentCircleLimit', v)} />
+          <Range label="最小親円半径" min={2} max={120} value={settings.minFittedRadius} onChange={(v) => updateSetting('minFittedRadius', v)} />
+          <Range label="最大親円半径" min={40} max={1200} value={settings.maxFittedRadius} onChange={(v) => updateSetting('maxFittedRadius', v)} />
+          <Range label="冗長中心距離" min={4} max={80} value={settings.duplicateCenterTolerance} onChange={(v) => updateSetting('duplicateCenterTolerance', v)} />
+          <Range label="冗長半径差" min={0.03} max={0.3} step={0.01} value={settings.duplicateRadiusTolerance} onChange={(v) => updateSetting('duplicateRadiusTolerance', v)} />
+          <Range label="ループ閉鎖許容" min={2} max={40} value={settings.loopClosureTolerance} onChange={(v) => updateSetting('loopClosureTolerance', v)} />
+          <Range label="ループ内側判定" min={0.05} max={0.9} step={0.01} value={settings.minLoopInsideScore} onChange={(v) => updateSetting('minLoopInsideScore', v)} />
+          <Range label="最小ループ面積" min={0} max={600} value={settings.minLoopArea} onChange={(v) => updateSetting('minLoopArea', v)} />
+          <Range label="円弧サンプル間隔" min={2} max={14} value={settings.arcSampleSpacing} onChange={(v) => updateSetting('arcSampleSpacing', v)} />
           <Range label="補助円の濃さ" min={0} max={1} step={0.01} value={settings.helperOpacity} onChange={(v) => updateSetting('helperOpacity', v)} />
           <Toggle label="補助円を表示" checked={settings.showHelpers} onChange={(v) => updateSetting('showHelpers', v)} />
-          <Toggle label="add 円を表示" checked={settings.showAddCircles} onChange={(v) => updateSetting('showAddCircles', v)} />
-          <Toggle label="subtract 円を表示" checked={settings.showSubtractCircles} onChange={(v) => updateSetting('showSubtractCircles', v)} />
-          <Toggle label="boundary 円を表示" checked={settings.showBoundaryCircles} onChange={(v) => updateSetting('showBoundaryCircles', v)} />
-          <Toggle label="helper 円を表示" checked={settings.showHelperCircles} onChange={(v) => updateSetting('showHelperCircles', v)} />
+          <Toggle label="親円を表示" checked={settings.showBoundaryCircles} onChange={(v) => updateSetting('showBoundaryCircles', v)} />
+          <Toggle label="薄い補助円を表示" checked={settings.showHelperCircles} onChange={(v) => updateSetting('showHelperCircles', v)} />
           <Toggle label="元画像を薄く重ねる" checked={settings.showImageOverlay} onChange={(v) => updateSetting('showImageOverlay', v)} />
           <Range label="元画像の濃さ" min={0.05} max={0.6} step={0.01} value={settings.imageOverlayOpacity} onChange={(v) => updateSetting('imageOverlayOpacity', v)} />
           <Toggle label="二値化マスクを重ねる" checked={settings.showMaskOverlay} onChange={(v) => updateSetting('showMaskOverlay', v)} />

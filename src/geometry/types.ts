@@ -285,6 +285,17 @@ export interface GeneratorSettings {
   threshold: number;
   blur: number;
   edgeStrength: number;
+  targetArcCount: number;
+  arcMergeAggressiveness: number;
+  visibleParentCircleLimit: number;
+  minFittedRadius: number;
+  maxFittedRadius: number;
+  duplicateCenterTolerance: number;
+  duplicateRadiusTolerance: number;
+  loopClosureTolerance: number;
+  minLoopInsideScore: number;
+  minLoopArea: number;
+  arcSampleSpacing: number;
   maxCircles: number;
   simplicity: number;
   helperOpacity: number;
