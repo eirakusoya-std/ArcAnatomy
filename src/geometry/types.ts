@@ -260,6 +260,13 @@ export interface ImageAnalysis {
   height: number;
   mask: Uint8Array;
   edge: Uint8Array;
+  contourLoops: Array<{
+    id: string;
+    points: Point[];
+    segments: number[][];
+    bounds: { minX: number; minY: number; maxX: number; maxY: number };
+    area: number;
+  }>;
   rawContourPoints: Point[];
   smoothedContourPoints: Point[];
   contourSegments: number[][];

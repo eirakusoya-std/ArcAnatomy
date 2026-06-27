@@ -338,7 +338,7 @@ export function App() {
           <div className="debug-table">
             {result && (
               <code>
-                selectedArcs={result.construction.splitArcPieces.filter((piece) => piece.selectedAsBoundary).length} snappedNodes={result.construction.faceDebug.graphNodesCount} graphEdges={result.construction.faceDebug.graphEdgesCount} closedLoops={result.construction.faceDebug.closedLoopsCount} selectedFillLoops={result.construction.faceDebug.selectedFacesCount} fallback={String(result.construction.faceDebug.fallbackUsed)} reason={result.construction.faceDebug.emptyReason ?? '-'}
+                selectedArcs={result.construction.splitArcPieces.filter((piece) => piece.selectedAsBoundary).length} snappedNodes={result.construction.faceDebug.graphNodesCount} graphEdges={result.construction.faceDebug.graphEdgesCount} detectedLoops={result.construction.faceDebug.closedLoopsCount} selectedFillLoops={result.construction.faceDebug.selectedFacesCount} rejectedLoops={result.construction.faceDebug.faceCandidatesCount - result.construction.faceDebug.selectedFacesCount} fallback={String(result.construction.faceDebug.fallbackUsed)} reason={result.construction.faceDebug.emptyReason ?? '-'}
               </code>
             )}
           </div>
@@ -357,7 +357,7 @@ export function App() {
           <h2>Loop Table</h2>
           <div className="debug-table">
             {result?.construction.faces.map((face) => (
-              <code key={face.id}>{face.id} source={face.source} closed=true area={face.area.toFixed(1)} centroid=({face.centroid.x.toFixed(1)}, {face.centroid.y.toFixed(1)}) edges={face.numEdges} insideMaskScore={face.insideMaskScore.toFixed(2)} depth={face.nestingDepth ?? 0} parent={face.parentFaceId ?? '-'} {face.selected ? 'selected' : `rejected:${face.rejectionReason}`}</code>
+              <code key={face.id}>{face.id} source={face.source} closed=true disconnected={face.parentFaceId ? 'false' : 'true'} area={face.area.toFixed(1)} centroid=({face.centroid.x.toFixed(1)}, {face.centroid.y.toFixed(1)}) edges={face.numEdges} insideMaskScore={face.insideMaskScore.toFixed(2)} nestingDepth={face.nestingDepth ?? 0} parent={face.parentFaceId ?? '-'} {face.selected ? 'selected' : `rejected:${face.rejectionReason}`}</code>
             ))}
           </div>
         </section>

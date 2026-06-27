@@ -48,162 +48,146 @@ export function buildConstruction(
 }
 
 function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: CircleSpec[]) {
-  const segments = makeContourArcSegments(analysis);
   const contourCircles: CircleSpec[] = [];
   const arcs: ArcSpec[] = [];
   const splitArcPieces: SplitArcPiece[] = [];
   const graphNodes: ArcGraphNode[] = [];
   const graphEdges: ArcGraphEdge[] = [];
-  const arcPieces: ArcLoopSegment[] = [];
-  const pieceMap = new Map<string, SplitArcPiece>();
+  const faces: FaceCandidate[] = [];
+  const sourceLoops = analysis.contourLoops.length
+    ? analysis.contourLoops
+    : [{ id: 'component-1', points: analysis.contourPoints, segments: analysis.contourSegments, bounds: analysis.bounds, area: analysis.mask.reduce((sum, value) => sum + value, 0) }];
 
-  segments.forEach((indices, segmentIndex) => {
-    const points = pointsForContourSegment(analysis, indices);
-    if (points.length < 3) return;
-    const fit = fitCircleToPoints(points) ?? fallbackCircleForPoints(points);
-    const startPoint = points[0];
-    const endPoint = points[points.length - 1];
-    const startAngle = pointAngleFromCenter(startPoint, fit.cx, fit.cy);
-    const endAngle = pointAngleFromCenter(endPoint, fit.cx, fit.cy);
-    const middleAngle = pointAngleFromCenter(points[Math.floor(points.length / 2)], fit.cx, fit.cy);
-    const direction: 'cw' | 'ccw' = angleInArc(middleAngle, startAngle, endAngle) ? 'ccw' : 'cw';
-    const span = direction === 'ccw' ? angleSpan(startAngle, endAngle) : angleSpan(endAngle, startAngle);
-    const arcLength = (span / 360) * Math.PI * 2 * fit.r;
-    const contourSupport = points.length / Math.max(1, analysis.contourPoints.length);
-    const circleId = `OC${segmentIndex + 1}`;
-    const circle: CircleSpec = {
-      id: circleId,
-      cx: fit.cx,
-      cy: fit.cy,
-      r: fit.r,
-      centerX: fit.cx,
-      centerY: fit.cy,
-      radius: fit.r,
-      role: 'boundary',
-      visible: true,
-      usedInFinal: true,
-      startAngle,
-      endAngle,
-      boundarySupport: contourSupport,
-      arcLength,
-      fitError: fit.error,
-      contourSupport,
-      coveredContourIndices: indices,
-      maskCoverage: 0,
-      outsidePenalty: fit.error,
-      score: Math.max(0, 1 - fit.error / Math.max(1, fit.r)),
-      source: 'contour_fit',
-      candidateKind: 'arc',
-      equation: `(x - ${fit.cx.toFixed(1)})^2 + (y - ${fit.cy.toFixed(1)})^2 = ${fit.r.toFixed(1)}^2`,
-    };
-    contourCircles.push(circle);
-    arcs.push({
-      id: `OA${segmentIndex + 1}`,
-      circleId,
-      startAngle,
-      endAngle,
-      usedInSilhouette: true,
-      usedAsHelperOnly: false,
+  sourceLoops.forEach((loop, loopIndex) => {
+    const prefix = `L${loopIndex + 1}`;
+    const segments = makeContourArcSegments(loop.points, loop.segments);
+    const arcPieces: ArcLoopSegment[] = [];
+    segments.forEach((indices, segmentIndex) => {
+      const points = pointsForContourSegment(loop.points, indices);
+      if (points.length < 3) return;
+      const fit = fitCircleToPoints(points) ?? fallbackCircleForPoints(points);
+      const startPoint = points[0];
+      const endPoint = points[points.length - 1];
+      const startAngle = pointAngleFromCenter(startPoint, fit.cx, fit.cy);
+      const endAngle = pointAngleFromCenter(endPoint, fit.cx, fit.cy);
+      const middleAngle = pointAngleFromCenter(points[Math.floor(points.length / 2)], fit.cx, fit.cy);
+      const direction: 'cw' | 'ccw' = angleInArc(middleAngle, startAngle, endAngle) ? 'ccw' : 'cw';
+      const span = direction === 'ccw' ? angleSpan(startAngle, endAngle) : angleSpan(endAngle, startAngle);
+      const arcLength = (span / 360) * Math.PI * 2 * fit.r;
+      const contourSupport = points.length / Math.max(1, loop.points.length);
+      const circleId = `OC${loopIndex + 1}-${segmentIndex + 1}`;
+      const arcId = `OA${loopIndex + 1}-${segmentIndex + 1}`;
+      const pieceId = `OP${loopIndex + 1}-${segmentIndex + 1}`;
+      const circle: CircleSpec = {
+        id: circleId,
+        cx: fit.cx,
+        cy: fit.cy,
+        r: fit.r,
+        centerX: fit.cx,
+        centerY: fit.cy,
+        radius: fit.r,
+        role: 'boundary',
+        visible: true,
+        usedInFinal: true,
+        startAngle,
+        endAngle,
+        boundarySupport: contourSupport,
+        arcLength,
+        fitError: fit.error,
+        contourSupport,
+        coveredContourIndices: indices,
+        maskCoverage: 0,
+        outsidePenalty: fit.error,
+        score: Math.max(0, 1 - fit.error / Math.max(1, fit.r)),
+        source: 'contour_fit',
+        candidateKind: 'arc',
+        equation: `(x - ${fit.cx.toFixed(1)})^2 + (y - ${fit.cy.toFixed(1)})^2 = ${fit.r.toFixed(1)}^2`,
+      };
+      contourCircles.push(circle);
+      arcs.push({ id: arcId, circleId, startAngle, endAngle, usedInSilhouette: true, usedAsHelperOnly: false });
+      const startNode = `${prefix}-N${segmentIndex + 1}`;
+      const endNode = `${prefix}-N${((segmentIndex + 1) % segments.length) + 1}`;
+      const segment: ArcLoopSegment = {
+        id: pieceId,
+        circleId,
+        cx: fit.cx,
+        cy: fit.cy,
+        r: fit.r,
+        startAngle,
+        endAngle,
+        startPoint,
+        endPoint,
+        direction,
+        contourSupport,
+        fitError: fit.error,
+      };
+      const sampledPoints = sampleArcLoopSegment(segment);
+      const piece: SplitArcPiece = {
+        id: pieceId,
+        parentArcId: arcId,
+        parentCircleId: circleId,
+        sourceArcId: arcId,
+        startNode,
+        endNode,
+        startPoint,
+        endPoint,
+        startAngle,
+        endAngle,
+        midpoint: sampledPoints[Math.floor(sampledPoints.length / 2)],
+        length: polylineLength(sampledPoints),
+        selectedAsBoundary: true,
+        points: sampledPoints,
+      };
+      splitArcPieces.push(piece);
+      graphEdges.push({ id: `${prefix}-E${segmentIndex + 1}`, startNode, endNode, sourceArcId: arcId, sourcePieceId: pieceId, direction, points: sampledPoints });
+      arcPieces.push(segment);
     });
-    const startNode = `N${segmentIndex + 1}`;
-    const endNode = `N${((segmentIndex + 1) % segments.length) + 1}`;
-    const sampledPoints = sampleArcLoopSegment({
-      id: `OP${segmentIndex + 1}`,
-      circleId,
-      cx: fit.cx,
-      cy: fit.cy,
-      r: fit.r,
-      startAngle,
-      endAngle,
-      startPoint,
-      endPoint,
-      direction,
-      contourSupport,
-      fitError: fit.error,
+
+    for (let i = 0; i < segments.length; i += 1) {
+      const point = loop.points[segments[i][0] ?? 0] ?? { x: 0, y: 0 };
+      graphNodes.push({
+        id: `${prefix}-N${i + 1}`,
+        x: point.x,
+        y: point.y,
+        incidentEdges: [`${prefix}-E${((i - 1 + segments.length) % segments.length) + 1}`, `${prefix}-E${i + 1}`],
+      });
+    }
+
+    const polygon = arcPieces.flatMap((piece, index) => {
+      const points = sampleArcLoopSegment(piece);
+      return index === 0 ? points : points.slice(1);
     });
-    const piece: SplitArcPiece = {
-      id: `OP${segmentIndex + 1}`,
-      parentArcId: `OA${segmentIndex + 1}`,
-      parentCircleId: circleId,
-      sourceArcId: `OA${segmentIndex + 1}`,
-      startNode,
-      endNode,
-      startPoint,
-      endPoint,
-      startAngle,
-      endAngle,
-      midpoint: sampledPoints[Math.floor(sampledPoints.length / 2)],
-      length: polylineLength(sampledPoints),
-      selectedAsBoundary: true,
-      points: sampledPoints,
-    };
-    splitArcPieces.push(piece);
-    pieceMap.set(piece.id, piece);
-    graphEdges.push({
-      id: `OE${segmentIndex + 1}`,
-      startNode,
-      endNode,
-      sourceArcId: piece.sourceArcId,
-      sourcePieceId: piece.id,
-      direction,
-      points: sampledPoints,
-    });
-    arcPieces.push({
-      id: piece.id,
-      circleId,
-      cx: fit.cx,
-      cy: fit.cy,
-      r: fit.r,
-      startAngle,
-      endAngle,
-      startPoint,
-      endPoint,
-      direction,
-      contourSupport,
-      fitError: fit.error,
+    const signedArea = polygon.length >= 3 ? polygonArea(polygon) : 0;
+    const area = Math.abs(signedArea);
+    const centroid = polygon.length >= 3 ? polygonCentroid(polygon) : analysis.centroid;
+    const insideMaskScore = sampleFaceInsideMask(analysis, polygon, centroid);
+    const closureGap = arcPieces.length > 1
+      ? Math.hypot(arcPieces[0].startPoint.x - arcPieces[arcPieces.length - 1].endPoint.x, arcPieces[0].startPoint.y - arcPieces[arcPieces.length - 1].endPoint.y)
+      : Number.POSITIVE_INFINITY;
+    const rejectionReason =
+      arcPieces.length < 3 ? 'invalid_loop'
+        : closureGap > 14 ? 'invalid_loop'
+          : area <= 24 ? 'tiny_face_noise'
+            : insideMaskScore < 0.35 ? 'low_inside_mask_score'
+              : undefined;
+    faces.push({
+      id: `contour-loop-${loopIndex + 1}`,
+      source: 'vector_loop',
+      edgeIds: arcPieces.map((piece) => piece.id),
+      arcPieces,
+      polygon,
+      samplePoints: sampleFacePoints(polygon, centroid),
+      area,
+      centroid,
+      numEdges: arcPieces.length,
+      insideMaskScore,
+      winding: signedArea >= 0 ? 'ccw' : 'cw',
+      nestingDepth: 0,
+      selected: !rejectionReason,
+      rejectionReason,
     });
   });
-
-  for (let i = 0; i < segments.length; i += 1) {
-    const point = analysis.contourPoints[segments[i][0] ?? 0] ?? { x: 0, y: 0 };
-    const edgeA = `OE${((i - 1 + segments.length) % segments.length) + 1}`;
-    const edgeB = `OE${i + 1}`;
-    graphNodes.push({ id: `N${i + 1}`, x: point.x, y: point.y, incidentEdges: [edgeA, edgeB] });
-  }
-
-  const polygon = arcPieces.flatMap((piece, index) => {
-    const points = sampleArcLoopSegment(piece);
-    return index === 0 ? points : points.slice(1);
-  });
-  const signedArea = polygon.length >= 3 ? polygonArea(polygon) : 0;
-  const area = Math.abs(signedArea);
-  const centroid = polygon.length >= 3 ? polygonCentroid(polygon) : analysis.centroid;
-  const insideMaskScore = sampleFaceInsideMask(analysis, polygon, centroid);
-  const closureGap = arcPieces.length > 1
-    ? Math.hypot(arcPieces[0].startPoint.x - arcPieces[arcPieces.length - 1].endPoint.x, arcPieces[0].startPoint.y - arcPieces[arcPieces.length - 1].endPoint.y)
-    : Number.POSITIVE_INFINITY;
-  const rejectionReason =
-    arcPieces.length < 3 ? 'invalid_loop'
-      : closureGap > 14 ? 'invalid_loop'
-        : area <= 24 ? 'tiny_face_noise'
-          : insideMaskScore < 0.35 ? 'low_inside_mask_score'
-            : undefined;
-  const faces: FaceCandidate[] = [{
-    id: 'contour-loop-1',
-    source: 'vector_loop',
-    edgeIds: arcPieces.map((piece) => piece.id),
-    arcPieces,
-    polygon,
-    samplePoints: sampleFacePoints(polygon, centroid),
-    area,
-    centroid,
-    numEdges: arcPieces.length,
-    insideMaskScore,
-    winding: signedArea >= 0 ? 'ccw' : 'cw',
-    nestingDepth: 0,
-    selected: !rejectionReason,
-    rejectionReason,
-  }];
+  assignFaceNesting(faces);
   const helperOnlyCircles = helperCircles.map((circle) => ({
     ...circle,
     role: circle.role === 'candidate' ? 'helper' as const : circle.role,
@@ -232,12 +216,11 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
   };
 }
 
-function makeContourArcSegments(analysis: ImageAnalysis) {
-  const contour = analysis.contourPoints;
+function makeContourArcSegments(contour: Point[], contourSegments: number[][]) {
   if (contour.length < 12) return [contour.map((_, index) => index)];
   const targetSegmentCount = Math.max(8, Math.min(18, Math.round(contour.length / 6)));
-  const baseSegments = analysis.contourSegments.length >= 6
-    ? analysis.contourSegments
+  const baseSegments = contourSegments.length >= 6
+    ? contourSegments
     : chunkContourIndices(contour.length, targetSegmentCount);
   const out: number[][] = [];
   const maxSegmentLength = Math.max(5, Math.round(contour.length / targetSegmentCount));
@@ -266,11 +249,11 @@ function chunkContourIndices(length: number, count: number) {
   }).filter((segment) => segment.length >= 4);
 }
 
-function pointsForContourSegment(analysis: ImageAnalysis, indices: number[]) {
-  const points = indices.map((index) => analysis.contourPoints[index]).filter(Boolean);
+function pointsForContourSegment(contour: Point[], indices: number[]) {
+  const points = indices.map((index) => contour[index]).filter(Boolean);
   if (indices.length > 0) {
-    const nextIndex = (indices[indices.length - 1] + 1) % analysis.contourPoints.length;
-    points.push(analysis.contourPoints[nextIndex]);
+    const nextIndex = (indices[indices.length - 1] + 1) % contour.length;
+    points.push(contour[nextIndex]);
   }
   return points;
 }

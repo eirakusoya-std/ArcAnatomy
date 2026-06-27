@@ -29,10 +29,12 @@ export function imageDataToAnalysis(
   const cleanedLines = majorityFilter(mask, width, height, edgeStrength);
   const cleaned = fillLineArtIfNeeded(cleanedLines, width, height);
   const edge = extractEdges(cleaned, width, height);
-  const rawContourPoints = extractOuterContour(cleaned, edge, width, height);
+  const contourLoops = extractContourLoops(cleaned, width, height, edgeStrength);
+  const primaryLoop = contourLoops[0];
+  const rawContourPoints = primaryLoop?.points ?? extractOuterContour(cleaned, edge, width, height);
   const smoothedContourPoints = smoothClosedPoints(rawContourPoints, Math.max(2, Math.round(3 + edgeStrength)));
-  const contourPoints = resampleClosedPolyline(smoothedContourPoints, Math.max(3, Math.round(Math.hypot(width, height) / 240)));
-  const contourSegments = splitContourSegments(contourPoints);
+  const contourPoints = primaryLoop?.points ?? resampleClosedPolyline(smoothedContourPoints, Math.max(3, Math.round(Math.hypot(width, height) / 240)));
+  const contourSegments = primaryLoop?.segments ?? splitContourSegments(contourPoints);
   const stats = computeStats(cleaned, width, height);
 
   return {
@@ -40,6 +42,7 @@ export function imageDataToAnalysis(
     height,
     mask: cleaned,
     edge,
+    contourLoops,
     rawContourPoints,
     smoothedContourPoints,
     contourSegments,
@@ -47,6 +50,70 @@ export function imageDataToAnalysis(
     centroid: stats.centroid,
     bounds: stats.bounds,
   };
+}
+
+function extractContourLoops(mask: Uint8Array, width: number, height: number, edgeStrength: number): ImageAnalysis['contourLoops'] {
+  const components = connectedComponents(mask, width, height)
+    .filter((component) => component.pixels.length >= 24)
+    .sort((a, b) => b.pixels.length - a.pixels.length);
+  const spacing = Math.max(3, Math.round(Math.hypot(width, height) / 240));
+  return components.map((component, index) => {
+    const componentMask = new Uint8Array(mask.length);
+    for (const pixel of component.pixels) componentMask[pixel] = 1;
+    const componentEdge = extractEdges(componentMask, width, height);
+    const raw = extractOuterContour(componentMask, componentEdge, width, height);
+    const smoothed = smoothClosedPoints(raw, Math.max(2, Math.round(3 + edgeStrength)));
+    const points = resampleClosedPolyline(smoothed, spacing);
+    return {
+      id: `component-${index + 1}`,
+      points,
+      segments: splitContourSegments(points),
+      bounds: component.bounds,
+      area: component.pixels.length,
+    };
+  });
+}
+
+function connectedComponents(mask: Uint8Array, width: number, height: number) {
+  const visited = new Uint8Array(mask.length);
+  const components: Array<{ pixels: number[]; bounds: { minX: number; minY: number; maxX: number; maxY: number } }> = [];
+  const neighbors = [
+    { x: 1, y: 0 },
+    { x: -1, y: 0 },
+    { x: 0, y: 1 },
+    { x: 0, y: -1 },
+  ];
+  for (let i = 0; i < mask.length; i += 1) {
+    if (!mask[i] || visited[i]) continue;
+    const queue = [i];
+    const pixels: number[] = [];
+    visited[i] = 1;
+    let minX = i % width;
+    let maxX = minX;
+    let minY = Math.floor(i / width);
+    let maxY = minY;
+    for (let head = 0; head < queue.length; head += 1) {
+      const pixel = queue[head];
+      pixels.push(pixel);
+      const x = pixel % width;
+      const y = Math.floor(pixel / width);
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+      for (const offset of neighbors) {
+        const nx = x + offset.x;
+        const ny = y + offset.y;
+        if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue;
+        const next = ny * width + nx;
+        if (!mask[next] || visited[next]) continue;
+        visited[next] = 1;
+        queue.push(next);
+      }
+    }
+    components.push({ pixels, bounds: { minX, minY, maxX, maxY } });
+  }
+  return components;
 }
 
 function fillLineArtIfNeeded(mask: Uint8Array, width: number, height: number): Uint8Array {
