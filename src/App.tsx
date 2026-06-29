@@ -3,7 +3,9 @@ import { Download, FileJson, ImageUp, Play, RefreshCw, Save, SlidersHorizontal }
 import { buildConstruction } from './geometry/reconstruction';
 import { imageDataToAnalysis } from './geometry/imageProcessing';
 import { buildSvg, downloadText, triggerDownload } from './geometry/exporters';
+import { buildConnectionInfo, buildDerivativeInfo, buildFormulaTable, buildReportData } from './geometry/reporting';
 import type { CircleDebugRow, CircleFittingDebugData, CircleRole, ConstructionData, GeneratorSettings } from './geometry/types';
+import type { ArcLabelMap } from './geometry/reporting';
 
 const defaultSettings: GeneratorSettings = {
   threshold: 118,
@@ -65,6 +67,9 @@ export function App() {
   const [settings, setSettings] = useState<GeneratorSettings>(defaultSettings);
   const [imageUrl, setImageUrl] = useState('');
   const [imageName, setImageName] = useState('sample-motif');
+  const [reportTitle, setReportTitle] = useState('Arc Anatomy: 円弧だけで描くシルエット');
+  const [reportConcept, setReportConcept] = useState('下絵の輪郭を円弧の集合として近似し、補助円と微分情報で構造を説明できる関数グラフアート。');
+  const [arcLabels, setArcLabels] = useState<ArcLabelMap>({});
   const [result, setResult] = useState<ResultState | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
@@ -97,6 +102,34 @@ export function App() {
       roleVisibility(settings),
     );
   }, [result, settings, imageUrl]);
+  const formulaTable = useMemo(
+    () => result ? buildFormulaTable(result.construction, arcLabels) : [],
+    [result, arcLabels],
+  );
+  const derivativeInfo = useMemo(
+    () => result ? buildDerivativeInfo(result.construction, arcLabels) : [],
+    [result, arcLabels],
+  );
+  const connectionInfo = useMemo(
+    () => result ? buildConnectionInfo(result.construction, arcLabels) : [],
+    [result, arcLabels],
+  );
+  const reportData = useMemo(() => {
+    if (!result) return null;
+    return buildReportData({
+      construction: result.construction,
+      labels: arcLabels,
+      settings,
+      title: reportTitle,
+      concept: reportConcept,
+      sourceImageInfo: {
+        name: imageName,
+        width: result.construction.width,
+        height: result.construction.height,
+        source: imageUrl.startsWith('data:') ? 'embedded-data-url' : imageUrl,
+      },
+    });
+  }, [result, arcLabels, settings, reportTitle, reportConcept, imageName, imageUrl]);
 
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -142,6 +175,10 @@ export function App() {
     setSettings((current) => ({ ...current, [key]: value }));
   }
 
+  function updateArcLabel(arcId: string, label: string) {
+    setArcLabels((current) => ({ ...current, [arcId]: label }));
+  }
+
   function exportJson() {
     if (!result) return;
     downloadText(`${imageName}-circle-construction.json`, JSON.stringify(makeDebugReport(result.construction, result.debug), null, 2), 'application/json');
@@ -154,22 +191,44 @@ export function App() {
 
   async function exportPng() {
     if (!result) return;
-    const blob = new Blob([previewSvg], { type: 'image/svg+xml' });
-    const url = URL.createObjectURL(blob);
-    const img = await loadImage(url);
-    const canvas = document.createElement('canvas');
-    canvas.width = result.construction.width;
-    canvas.height = result.construction.height;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-    ctx.drawImage(img, 0, 0);
-    URL.revokeObjectURL(url);
-    canvas.toBlob((png) => {
-      if (!png) return;
-      const pngUrl = URL.createObjectURL(png);
-      triggerDownload(`${imageName}-arc-anatomy.png`, pngUrl);
-      URL.revokeObjectURL(pngUrl);
-    }, 'image/png');
+    await downloadSvgAsPng(previewSvg, result.construction.width, result.construction.height, `${imageName}-arc-anatomy.png`);
+  }
+
+  function exportReportData() {
+    if (!reportData) return;
+    downloadText(`${imageName}-report-data.json`, JSON.stringify(reportData, null, 2), 'application/json');
+  }
+
+  function exportVariantSvg(kind: 'final' | 'blueprint' | 'process') {
+    if (!result) return;
+    downloadText(`${imageName}-${kind}.svg`, svgForExportKind(kind, result), 'image/svg+xml');
+  }
+
+  async function exportVariantPng(kind: 'final' | 'blueprint' | 'process') {
+    if (!result) return;
+    await downloadSvgAsPng(svgForExportKind(kind, result), result.construction.width, result.construction.height, `${imageName}-${kind}.png`);
+  }
+
+  function svgForExportKind(kind: 'final' | 'blueprint' | 'process', state: ResultState) {
+    if (kind === 'final') {
+      return buildSvg(state.construction, 0, false);
+    }
+    if (kind === 'blueprint') {
+      return buildSvg(state.construction, 0.62, true, '', 0, '', 0, {
+        add: true,
+        subtract: true,
+        boundary: true,
+        helper: true,
+        candidate: false,
+      });
+    }
+    return buildSvg(state.construction, 0.66, true, imageUrl, 0.28, state.maskOverlayUrl, 0.24, {
+      add: true,
+      subtract: true,
+      boundary: true,
+      helper: true,
+      candidate: false,
+    });
   }
 
   return (
@@ -194,6 +253,18 @@ export function App() {
           <RefreshCw size={16} />
           再生成
         </button>
+
+        <section className="control-group">
+          <h2>提出情報</h2>
+          <label className="text-control">
+            <span>作品タイトル</span>
+            <input value={reportTitle} onChange={(event) => setReportTitle(event.target.value)} />
+          </label>
+          <label className="text-control">
+            <span>コンセプト</span>
+            <textarea value={reportConcept} onChange={(event) => setReportConcept(event.target.value)} />
+          </label>
+        </section>
 
         <section className="control-group">
           <h2><SlidersHorizontal size={16} /> 前処理</h2>
@@ -247,6 +318,66 @@ export function App() {
           <button className="icon-button" onClick={exportSvg} title="SVGを保存"><Save size={17} /></button>
           <button className="icon-button" onClick={exportPng} title="PNGを保存"><Download size={17} /></button>
         </div>
+
+        <section className="control-group">
+          <h2>提出用エクスポート</h2>
+          <div className="export-grid">
+            <button onClick={() => exportVariantSvg('final')}>完成SVG</button>
+            <button onClick={() => void exportVariantPng('final')}>完成PNG</button>
+            <button onClick={() => exportVariantSvg('blueprint')}>設計図SVG</button>
+            <button onClick={() => void exportVariantPng('blueprint')}>設計図PNG</button>
+            <button onClick={() => exportVariantSvg('process')}>工程SVG</button>
+            <button onClick={() => void exportVariantPng('process')}>工程PNG</button>
+            <button className="wide-button" onClick={exportReportData}>Report Data JSON</button>
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>数式一覧 / 手動ラベル</h2>
+          <div className="report-table formula-table">
+            {formulaTable.map((row) => (
+              <article className="report-row" key={row.arcId}>
+                <label className="label-editor">
+                  <span>{row.arcId}</span>
+                  <input
+                    value={arcLabels[row.arcId] ?? ''}
+                    placeholder={row.label}
+                    onChange={(event) => updateArcLabel(row.arcId, event.target.value)}
+                  />
+                </label>
+                <code>{row.circleEquation}</code>
+                <code>{row.parametricEquation}</code>
+                <small>
+                  {row.circleId} · theta {row.startAngle.toFixed(1)}-{row.endAngle.toFixed(1)} deg · {row.direction} ·
+                  center=({row.centerX.toFixed(1)},{row.centerY.toFixed(1)}) · r={row.radius.toFixed(1)} ·
+                  arc={row.arcLength.toFixed(1)} · k={row.curvature.toFixed(4)} · fit={row.fitError.toFixed(2)} · support={row.contourSupport.toFixed(2)}
+                </small>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>微分情報</h2>
+          <div className="debug-table">
+            {derivativeInfo.map((item) => (
+              <code key={item.arcId}>
+                {item.arcId} {item.label}: k={item.curvature.toFixed(4)} startVec=({item.startTangentVector.x.toFixed(1)},{item.startTangentVector.y.toFixed(1)}) midVec=({item.midTangentVector.x.toFixed(1)},{item.midTangentVector.y.toFixed(1)}) endVec=({item.endTangentVector.x.toFixed(1)},{item.endTangentVector.y.toFixed(1)}) slopes={formatSlope(item.startSlope)}/{formatSlope(item.midSlope)}/{formatSlope(item.endSlope)}
+              </code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>接続チェック</h2>
+          <div className="debug-table">
+            {connectionInfo.map((item) => (
+              <code key={`${item.fromArcId}-${item.toArcId}`}>
+                {item.fromArcId} -&gt; {item.toArcId}: gap={item.positionGap.toFixed(2)} angleDelta={item.tangentAngleDelta.toFixed(1)}deg score={item.tangentContinuityScore.toFixed(2)} {item.connectionType}
+              </code>
+            ))}
+          </div>
+        </section>
 
         <section className="control-group">
           <h2>使用円一覧</h2>
@@ -807,6 +938,32 @@ function loadImage(src: string) {
     image.onerror = reject;
     image.src = src;
   });
+}
+
+async function downloadSvgAsPng(svg: string, width: number, height: number, filename: string) {
+  const blob = new Blob([svg], { type: 'image/svg+xml' });
+  const url = URL.createObjectURL(blob);
+  const img = await loadImage(url);
+  const canvas = document.createElement('canvas');
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    URL.revokeObjectURL(url);
+    return;
+  }
+  ctx.drawImage(img, 0, 0);
+  URL.revokeObjectURL(url);
+  canvas.toBlob((png) => {
+    if (!png) return;
+    const pngUrl = URL.createObjectURL(png);
+    triggerDownload(filename, pngUrl);
+    URL.revokeObjectURL(pngUrl);
+  }, 'image/png');
+}
+
+function formatSlope(value: number | null) {
+  return value === null ? 'vertical' : value.toFixed(2);
 }
 
 function createSampleImage() {

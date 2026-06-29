@@ -27,7 +27,8 @@ body {
 }
 
 button,
-input {
+input,
+textarea {
   font: inherit;
 }
 
@@ -210,6 +211,28 @@ input[type="checkbox"] {
   gap: 10px;
 }
 
+.export-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.export-grid button {
+  min-height: 36px;
+  border: 1px solid #c8c0b4;
+  border-radius: 8px;
+  background: #fffdf8;
+  cursor: pointer;
+  color: #24262a;
+}
+
+.export-grid .wide-button {
+  grid-column: 1 / -1;
+  background: #191a1d;
+  color: #ffffff;
+  border-color: #191a1d;
+}
+
 .icon-button {
   display: grid;
   place-items: center;
@@ -224,7 +247,8 @@ input[type="checkbox"] {
 .formula-box,
 .arc-list,
 .debug-grid,
-.debug-table {
+.debug-table,
+.report-table {
   display: grid;
   gap: 10px;
 }
@@ -236,6 +260,54 @@ input[type="checkbox"] {
   border: 1px solid #ddd6ca;
   border-radius: 8px;
   background: #fffdf8;
+}
+
+.report-row {
+  display: grid;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid #ddd6ca;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.label-editor,
+.text-control {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  color: #5f5b54;
+}
+
+.label-editor {
+  grid-template-columns: 74px 1fr;
+  align-items: center;
+}
+
+.text-control {
+  margin-bottom: 14px;
+}
+
+.label-editor input,
+.text-control input,
+.text-control textarea {
+  width: 100%;
+  border: 1px solid #c8c0b4;
+  border-radius: 8px;
+  background: #fffdf8;
+  color: #191a1d;
+  padding: 8px 9px;
+}
+
+.text-control textarea {
+  min-height: 76px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.report-row code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .circle-item div {
