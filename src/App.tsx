@@ -49,6 +49,14 @@ const defaultSettings: GeneratorSettings = {
   interiorFillPenaltyWeight: 1.4,
   targetContourCoverage: 0.72,
   maxGoodRemovalRatio: 0.18,
+  enableArcGroupMerging: true,
+  maxMergeGroupSize: 4,
+  tangentMergeThreshold: 24,
+  refitErrorThreshold: 5.4,
+  errorIncreaseThreshold: 1.8,
+  simplicityWeight: 0.72,
+  tangentWeight: 0.52,
+  errorWeight: 0.64,
 };
 
 interface ResultState {
@@ -286,6 +294,14 @@ export function App() {
           <Range label="ループ内側判定" min={0.05} max={0.9} step={0.01} value={settings.minLoopInsideScore} onChange={(v) => updateSetting('minLoopInsideScore', v)} />
           <Range label="最小ループ面積" min={0} max={600} value={settings.minLoopArea} onChange={(v) => updateSetting('minLoopArea', v)} />
           <Range label="円弧サンプル間隔" min={2} max={14} value={settings.arcSampleSpacing} onChange={(v) => updateSetting('arcSampleSpacing', v)} />
+          <Toggle label="滑らかな円弧群を統合" checked={settings.enableArcGroupMerging} onChange={(v) => updateSetting('enableArcGroupMerging', v)} />
+          <Range label="最大統合グループ数" min={2} max={5} value={settings.maxMergeGroupSize} onChange={(v) => updateSetting('maxMergeGroupSize', v)} />
+          <Range label="接線統合しきい値" min={6} max={60} value={settings.tangentMergeThreshold} onChange={(v) => updateSetting('tangentMergeThreshold', v)} />
+          <Range label="再フィット誤差しきい値" min={1} max={16} step={0.1} value={settings.refitErrorThreshold} onChange={(v) => updateSetting('refitErrorThreshold', v)} />
+          <Range label="誤差悪化率しきい値" min={1} max={4} step={0.05} value={settings.errorIncreaseThreshold} onChange={(v) => updateSetting('errorIncreaseThreshold', v)} />
+          <Range label="簡潔さ重み" min={0} max={2} step={0.01} value={settings.simplicityWeight} onChange={(v) => updateSetting('simplicityWeight', v)} />
+          <Range label="接線重み" min={0} max={2} step={0.01} value={settings.tangentWeight} onChange={(v) => updateSetting('tangentWeight', v)} />
+          <Range label="誤差重み" min={0} max={2} step={0.01} value={settings.errorWeight} onChange={(v) => updateSetting('errorWeight', v)} />
           <Range label="補助円の濃さ" min={0} max={1} step={0.01} value={settings.helperOpacity} onChange={(v) => updateSetting('helperOpacity', v)} />
           <Toggle label="補助円を表示" checked={settings.showHelpers} onChange={(v) => updateSetting('showHelpers', v)} />
           <Toggle label="親円を表示" checked={settings.showBoundaryCircles} onChange={(v) => updateSetting('showBoundaryCircles', v)} />
@@ -374,6 +390,28 @@ export function App() {
             {connectionInfo.map((item) => (
               <code key={`${item.fromArcId}-${item.toArcId}`}>
                 {item.fromArcId} -&gt; {item.toArcId}: gap={item.positionGap.toFixed(2)} angleDelta={item.tangentAngleDelta.toFixed(1)}deg score={item.tangentContinuityScore.toFixed(2)} {item.connectionType}
+              </code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Arc Group Merge Debug</h2>
+          <div className="debug-table">
+            {result?.construction.arcGroupMergeDebug.slice(0, 36).map((group) => (
+              <code key={group.groupId}>
+                {group.groupId} [{group.memberArcIds.join(', ')}] range={group.contourRange.startIndex}-{group.contourRange.endIndex} original={group.originalError.toFixed(2)} refit={group.refitError.toFixed(2)} ratio={group.errorIncreaseRatio.toFixed(2)} tangent={group.meanTangentDelta.toFixed(1)}/{group.maxTangentDelta.toFixed(1)} score={group.mergeScore.toFixed(2)} {group.merged ? 'merged' : `rejected:${group.rejectionReason}`}
+              </code>
+            ))}
+          </div>
+        </section>
+
+        <section className="control-group">
+          <h2>Merged Arc Info</h2>
+          <div className="debug-table">
+            {result?.construction.mergedArcInfo.map((arc) => (
+              <code key={arc.newArcId}>
+                {arc.newArcId} from=[{arc.mergedFromArcIds.join(', ')}] cx={arc.centerX.toFixed(1)} cy={arc.centerY.toFixed(1)} r={arc.radius.toFixed(1)} start={arc.startAngle.toFixed(1)} end={arc.endAngle.toFixed(1)} fit={arc.fitError.toFixed(2)} arc={arc.arcLength.toFixed(1)}
               </code>
             ))}
           </div>
@@ -875,6 +913,8 @@ function makeDebugReport(construction: ConstructionData, debug: CircleFittingDeb
       graphNodes: construction.graphNodes,
       graphEdges: construction.graphEdges,
       faces: construction.faces,
+      arcGroupMergeDebug: construction.arcGroupMergeDebug,
+      mergedArcInfo: construction.mergedArcInfo,
       shapeOptimization: debug.shapeOptimization,
     },
   };

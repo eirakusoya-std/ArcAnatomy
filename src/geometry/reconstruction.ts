@@ -2,6 +2,7 @@ import type {
   ArcGraphEdge,
   ArcGraphNode,
   ArcIntersection,
+  ArcGroupMergeDebug,
   ArcLoopSegment,
   ArcSpec,
   CircleSpec,
@@ -10,6 +11,7 @@ import type {
   FaceDebugSummary,
   GeneratorSettings,
   ImageAnalysis,
+  MergedArcInfo,
   Point,
   RegionCondition,
   SplitArcPiece,
@@ -28,6 +30,14 @@ type ReconstructionSettings = Pick<
   | 'minLoopInsideScore'
   | 'minLoopArea'
   | 'arcSampleSpacing'
+  | 'enableArcGroupMerging'
+  | 'maxMergeGroupSize'
+  | 'tangentMergeThreshold'
+  | 'refitErrorThreshold'
+  | 'errorIncreaseThreshold'
+  | 'simplicityWeight'
+  | 'tangentWeight'
+  | 'errorWeight'
 >;
 
 const defaultReconstructionSettings: ReconstructionSettings = {
@@ -42,6 +52,14 @@ const defaultReconstructionSettings: ReconstructionSettings = {
   minLoopInsideScore: 0.35,
   minLoopArea: 24,
   arcSampleSpacing: 5,
+  enableArcGroupMerging: true,
+  maxMergeGroupSize: 4,
+  tangentMergeThreshold: 24,
+  refitErrorThreshold: 5.4,
+  errorIncreaseThreshold: 1.8,
+  simplicityWeight: 0.72,
+  tangentWeight: 0.52,
+  errorWeight: 0.64,
 };
 
 export function buildConstruction(
@@ -72,6 +90,8 @@ export function buildConstruction(
     graphEdges: contourChain.graphEdges,
     faces: contourChain.faces,
     faceDebug: contourChain.faceDebug,
+    arcGroupMergeDebug: contourChain.arcGroupMergeDebug,
+    mergedArcInfo: contourChain.mergedArcInfo,
     conditions,
     expression,
     generatedAt: new Date().toISOString(),
@@ -85,6 +105,8 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
   const graphNodes: ArcGraphNode[] = [];
   const graphEdges: ArcGraphEdge[] = [];
   const faces: FaceCandidate[] = [];
+  const arcGroupMergeDebug: ArcGroupMergeDebug[] = [];
+  const mergedArcInfo: MergedArcInfo[] = [];
   let rawCandidatesCount = 0;
   let suppressedCandidates = 0;
   let mergedClusters = 0;
@@ -96,10 +118,13 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
     const prefix = `L${loopIndex + 1}`;
     const segments = makeContourArcSegments(loop.points, loop.segments, settings);
     const rawCandidates = fitContourArcCandidates(loop.points, segments, settings);
-    const mergedCandidates = mergeRedundantContourCandidates(loop.points, rawCandidates, settings);
+    const redundantMergedCandidates = mergeRedundantContourCandidates(loop.points, rawCandidates, settings);
+    const groupMerge = mergeSmoothArcGroups(loop.points, redundantMergedCandidates, settings, loopIndex + 1);
+    const mergedCandidates = groupMerge.candidates;
     rawCandidatesCount += rawCandidates.length;
     suppressedCandidates += rawCandidates.length - mergedCandidates.length;
     mergedClusters += mergedCandidates.filter((candidate) => candidate.memberCount > 1).length;
+    arcGroupMergeDebug.push(...groupMerge.debug);
     const arcPieces: ArcLoopSegment[] = [];
     mergedCandidates.forEach((candidate, segmentIndex) => {
       const { indices, points, fit, memberCount } = candidate;
@@ -143,6 +168,25 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
       };
       contourCircles.push(circle);
       arcs.push({ id: arcId, circleId, startAngle, endAngle, usedInSilhouette: true, usedAsHelperOnly: false });
+      if (candidate.mergeInfo) {
+        mergedArcInfo.push({
+          newArcId: arcId,
+          mergedFromArcIds: candidate.sourceCandidateIds,
+          centerX: fit.cx,
+          centerY: fit.cy,
+          radius: fit.r,
+          startAngle,
+          endAngle,
+          direction,
+          fitError: fit.error,
+          arcLength,
+          originalError: candidate.mergeInfo.originalError,
+          refitError: candidate.mergeInfo.refitError,
+          tangentDeltaStats: candidate.mergeInfo.tangentDeltaStats,
+          simplicityGain: candidate.mergeInfo.simplicityGain,
+          mergeReason: candidate.mergeInfo.mergeReason,
+        });
+      }
       const startNode = `${prefix}-N${segmentIndex + 1}`;
       const endNode = `${prefix}-N${((segmentIndex + 1) % segments.length) + 1}`;
       const segment: ArcLoopSegment = {
@@ -259,6 +303,8 @@ function buildContourOrderedArcChain(analysis: ImageAnalysis, helperCircles: Cir
     graphEdges,
     faces,
     faceDebug,
+    arcGroupMergeDebug,
+    mergedArcInfo,
   };
 }
 
@@ -342,11 +388,19 @@ interface FittedContourCandidate {
   points: Point[];
   fit: { cx: number; cy: number; r: number; error: number };
   memberCount: number;
+  sourceCandidateIds: string[];
+  mergeInfo?: {
+    originalError: number;
+    refitError: number;
+    tangentDeltaStats: { mean: number; max: number };
+    simplicityGain: number;
+    mergeReason: string;
+  };
 }
 
 function fitContourArcCandidates(contour: Point[], segments: number[][], settings: ReconstructionSettings): FittedContourCandidate[] {
   return segments
-    .map((indices) => {
+    .map((indices, index) => {
       const points = pointsForContourSegment(contour, indices);
       if (points.length < 3) return undefined;
       const fit = fitCircleToPoints(points) ?? fallbackCircleForPoints(points);
@@ -358,6 +412,7 @@ function fitContourArcCandidates(contour: Point[], segments: number[][], setting
         points,
         fit: radiusFilteredFit,
         memberCount: 1,
+        sourceCandidateIds: [`raw-arc-${index + 1}`],
       };
     })
     .filter((candidate): candidate is FittedContourCandidate => Boolean(candidate));
@@ -402,7 +457,193 @@ function tryMergeContourCandidates(contour: Point[], a: FittedContourCandidate, 
     points,
     fit,
     memberCount: a.memberCount + b.memberCount,
+    sourceCandidateIds: [...a.sourceCandidateIds, ...b.sourceCandidateIds],
+    mergeInfo: a.mergeInfo ?? b.mergeInfo,
   };
+}
+
+interface ArcGroupMergeEvaluation {
+  candidate: FittedContourCandidate;
+  debug: ArcGroupMergeDebug;
+  groupSize: number;
+}
+
+function mergeSmoothArcGroups(
+  contour: Point[],
+  candidates: FittedContourCandidate[],
+  settings: ReconstructionSettings,
+  loopNumber: number,
+) {
+  if (!settings.enableArcGroupMerging || candidates.length < 2) {
+    return { candidates, debug: [] as ArcGroupMergeDebug[] };
+  }
+
+  const out: FittedContourCandidate[] = [];
+  const debug: ArcGroupMergeDebug[] = [];
+  let i = 0;
+  let groupSerial = 1;
+  while (i < candidates.length) {
+    let best: ArcGroupMergeEvaluation | undefined;
+    const maxSize = Math.min(settings.maxMergeGroupSize, candidates.length - i);
+    for (let size = 2; size <= maxSize; size += 1) {
+      const group = candidates.slice(i, i + size);
+      const evaluation = evaluateArcGroupMerge(contour, group, settings, `GM${loopNumber}-${groupSerial}`);
+      debug.push(evaluation.debug);
+      groupSerial += 1;
+      if (!evaluation.debug.merged) continue;
+      if (!best || evaluation.debug.mergeScore > best.debug.mergeScore) best = evaluation;
+    }
+
+    if (best) {
+      out.push(best.candidate);
+      i += best.groupSize;
+    } else {
+      out.push(candidates[i]);
+      i += 1;
+    }
+  }
+
+  return { candidates: out, debug };
+}
+
+function evaluateArcGroupMerge(
+  contour: Point[],
+  group: FittedContourCandidate[],
+  settings: ReconstructionSettings,
+  groupId: string,
+): ArcGroupMergeEvaluation {
+  const memberArcIds = group.flatMap((candidate) => candidate.sourceCandidateIds);
+  const contourRange = contourRangeForCandidates(group, contour.length);
+  const notContiguous = !areCandidateIndicesContiguous(group, contour.length);
+  const tangentAngleDeltas = tangentDeltasForGroup(group);
+  const meanTangentDelta = tangentAngleDeltas.reduce((sum, value) => sum + value, 0) / Math.max(1, tangentAngleDeltas.length);
+  const maxTangentDelta = tangentAngleDeltas.reduce((max, value) => Math.max(max, value), 0);
+  const indices = group.reduce((merged, candidate) => mergeContourIndices(merged, candidate.indices, contour.length), [] as number[]);
+  const points = pointsForContourSegment(contour, indices);
+  const refit = points.length >= 3 ? fitCircleToPoints(points) ?? fallbackCircleForPoints(points) : undefined;
+  const originalError = weightedOriginalError(group);
+  const refitError = refit?.error ?? Number.POSITIVE_INFINITY;
+  const errorIncreaseRatio = refitError / Math.max(0.15, originalError);
+  const simplicityGain = (group.length - 1) / Math.max(1, group.length);
+  const tangentContinuityScore = Math.max(0, 1 - meanTangentDelta / Math.max(1, settings.tangentMergeThreshold));
+  const absoluteErrorPenalty = Math.max(0, refitError / Math.max(0.1, settings.refitErrorThreshold) - 1);
+  const featureLossPenalty = featureLossPenaltyForGroup(group, refitError, maxTangentDelta, settings);
+  const mergeScore =
+    settings.simplicityWeight * simplicityGain +
+    settings.tangentWeight * tangentContinuityScore -
+    settings.errorWeight * Math.max(0, errorIncreaseRatio - 1) -
+    settings.errorWeight * absoluteErrorPenalty -
+    featureLossPenalty;
+
+  const rejectionReason =
+    notContiguous ? 'not_contiguous'
+      : maxTangentDelta > settings.tangentMergeThreshold * 1.9 ? 'tangent_break_too_large'
+        : refitError > settings.refitErrorThreshold ? 'high_refit_error'
+          : errorIncreaseRatio > settings.errorIncreaseThreshold ? 'high_refit_error'
+            : featureLossPenalty > 0 ? 'feature_loss'
+              : mergeScore < 0.28 ? 'merge_score_too_low'
+                : undefined;
+  const merged = Boolean(refit && !rejectionReason);
+  const debug: ArcGroupMergeDebug = {
+    groupId,
+    memberArcIds,
+    contourRange,
+    originalError,
+    refitError,
+    errorIncreaseRatio,
+    meanTangentDelta,
+    maxTangentDelta,
+    simplicityGain,
+    mergeScore,
+    merged,
+    rejectionReason,
+  };
+
+  const candidate: FittedContourCandidate = merged && refit
+    ? {
+        indices,
+        points,
+        fit: refit,
+        memberCount: group.reduce((sum, item) => sum + item.memberCount, 0),
+        sourceCandidateIds: memberArcIds,
+        mergeInfo: {
+          originalError,
+          refitError,
+          tangentDeltaStats: { mean: meanTangentDelta, max: maxTangentDelta },
+          simplicityGain,
+          mergeReason: 'smooth_contiguous_arc_group_refit',
+        },
+      }
+    : group[0];
+  return { candidate, debug, groupSize: group.length };
+}
+
+function areCandidateIndicesContiguous(group: FittedContourCandidate[], contourLength: number) {
+  for (let i = 0; i < group.length - 1; i += 1) {
+    const a = group[i].indices[group[i].indices.length - 1];
+    const b = group[i + 1].indices[0];
+    const forwardGap = (b - a + contourLength) % contourLength;
+    if (forwardGap > 3 && forwardGap < contourLength - 3) return false;
+  }
+  return true;
+}
+
+function contourRangeForCandidates(group: FittedContourCandidate[], contourLength: number) {
+  const startIndex = group[0].indices[0] ?? 0;
+  const endIndex = group[group.length - 1].indices[group[group.length - 1].indices.length - 1] ?? startIndex;
+  const count = mergeContourIndices(group.flatMap((candidate) => candidate.indices), [], contourLength).length;
+  return { startIndex, endIndex, count };
+}
+
+function tangentDeltasForGroup(group: FittedContourCandidate[]) {
+  const out: number[] = [];
+  for (let i = 0; i < group.length - 1; i += 1) {
+    const a = group[i];
+    const b = group[i + 1];
+    const aEnd = a.points[a.points.length - 1];
+    const bStart = b.points[0];
+    const aAngle = tangentAngleAtPoint(aEnd, a.fit, arcDirectionForCandidate(a));
+    const bAngle = tangentAngleAtPoint(bStart, b.fit, arcDirectionForCandidate(b));
+    out.push(smallestAngleDifference(aAngle, bAngle));
+  }
+  return out;
+}
+
+function arcDirectionForCandidate(candidate: FittedContourCandidate): 'cw' | 'ccw' {
+  const start = pointAngleFromCenter(candidate.points[0], candidate.fit.cx, candidate.fit.cy);
+  const end = pointAngleFromCenter(candidate.points[candidate.points.length - 1], candidate.fit.cx, candidate.fit.cy);
+  const mid = pointAngleFromCenter(candidate.points[Math.floor(candidate.points.length / 2)], candidate.fit.cx, candidate.fit.cy);
+  return angleInArc(mid, start, end) ? 'ccw' : 'cw';
+}
+
+function tangentAngleAtPoint(point: Point, fit: { cx: number; cy: number; r: number }, direction: 'cw' | 'ccw') {
+  const theta = Math.atan2(point.y - fit.cy, point.x - fit.cx);
+  const sign = direction === 'ccw' ? 1 : -1;
+  const tx = -fit.r * Math.sin(theta) * sign;
+  const ty = fit.r * Math.cos(theta) * sign;
+  return normalizeAngle((Math.atan2(ty, tx) * 180) / Math.PI);
+}
+
+function smallestAngleDifference(a: number, b: number) {
+  const delta = Math.abs(normalizeAngle(a - b));
+  return Math.min(delta, 360 - delta);
+}
+
+function weightedOriginalError(group: FittedContourCandidate[]) {
+  const total = group.reduce((sum, candidate) => sum + candidate.points.length, 0);
+  return group.reduce((sum, candidate) => sum + candidate.fit.error * candidate.points.length, 0) / Math.max(1, total);
+}
+
+function featureLossPenaltyForGroup(
+  group: FittedContourCandidate[],
+  refitError: number,
+  maxTangentDelta: number,
+  settings: ReconstructionSettings,
+) {
+  const veryShortFeature = group.some((candidate) => candidate.points.length <= 5 && candidate.fit.r <= settings.minFittedRadius * 3);
+  const sharpTurn = maxTangentDelta > settings.tangentMergeThreshold * 1.45;
+  const noisyRefit = refitError > settings.refitErrorThreshold * 0.86;
+  return (veryShortFeature ? 0.22 : 0) + (sharpTurn ? 0.32 : 0) + (noisyRefit ? 0.18 : 0);
 }
 
 function areRedundantContourFits(

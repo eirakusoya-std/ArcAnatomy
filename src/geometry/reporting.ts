@@ -81,6 +81,8 @@ export interface ReportData {
   derivativeInfo: DerivativeInfo[];
   connectionInfo: ConnectionInfo[];
   helperCircles: CircleSpec[];
+  arcGroupMergeDebug: ConstructionData['arcGroupMergeDebug'];
+  mergedArcInfo: ConstructionData['mergedArcInfo'];
   processSummary: string[];
   improvementLogTemplate: string[];
   generatedAt: string;
@@ -116,6 +118,8 @@ export function buildReportData(input: ReportBuildInput): ReportData {
     derivativeInfo: buildDerivativeInfo(input.construction, input.labels),
     connectionInfo: buildConnectionInfo(input.construction, input.labels),
     helperCircles: input.construction.circles.filter((circle) => !circle.usedInFinal || circle.role === 'helper'),
+    arcGroupMergeDebug: input.construction.arcGroupMergeDebug,
+    mergedArcInfo: input.construction.mergedArcInfo,
     processSummary: [
       '入力画像をキャンバスに読み込み、輝度をもとに二値化した。',
       '二値化マスクから境界画素を見つけ、輪郭を抽出した。',
@@ -123,6 +127,7 @@ export function buildReportData(input: ReportBuildInput): ReportData {
       '輪郭の接線方向の変化が大きい点を使ってセグメントに分割した。',
       '各セグメントの点群を円弧に最小二乗フィットした。',
       '中心と半径が近い円を統合し、冗長な補助円を抑制した。',
+      '輪郭順に連続する円弧群について、微分から得た接線方向と再フィット誤差を調べ、過剰分割された滑らかな区間を代表円弧に統合した。',
       '採用した円弧列をSVG pathとして閉じ、内部を塗って完成形にした。',
       '補助円を表示し、作品を構成する親円が分かる設計図として確認した。',
     ],
@@ -130,7 +135,8 @@ export function buildReportData(input: ReportBuildInput): ReportData {
       '初期案: 塗り円を足し引きする方法で形を近似したが、輪郭の説明が弱かった。',
       '改善1: 塗り優先から輪郭優先に切り替え、下絵の境界に沿って円弧を選ぶようにした。',
       '改善2: 円の合成結果ではなく、円弧列そのものを閉じたSVG pathに変換する方式にした。',
-      '改善3: 数式一覧、微分情報、接続点の接線角度差を出力し、数学的な説明に使えるようにした。',
+      '改善3: 半径や中心の近さだけでなく、接線方向の連続性と再フィット誤差で過剰分割された円弧群を統合した。',
+      '改善4: 数式一覧、微分情報、接続点の接線角度差を出力し、数学的な説明に使えるようにした。',
       '最終確認: 完成作品、補助円つき設計図、下絵/マスク/輪郭の工程画像を分けて保存した。',
     ],
     generatedAt: new Date().toISOString(),

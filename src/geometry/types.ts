@@ -167,6 +167,46 @@ export interface FaceDebugSummary {
   emptyReason?: 'no_closed_loops_found' | 'all_faces_rejected_by_inside_score' | 'boundary_arcs_do_not_form_regions' | 'mask_sampling_failed';
 }
 
+export type ArcGroupMergeRejectionReason =
+  | 'high_refit_error'
+  | 'tangent_break_too_large'
+  | 'feature_loss'
+  | 'not_contiguous'
+  | 'merge_score_too_low';
+
+export interface ArcGroupMergeDebug {
+  groupId: string;
+  memberArcIds: string[];
+  contourRange: { startIndex: number; endIndex: number; count: number };
+  originalError: number;
+  refitError: number;
+  errorIncreaseRatio: number;
+  meanTangentDelta: number;
+  maxTangentDelta: number;
+  simplicityGain: number;
+  mergeScore: number;
+  merged: boolean;
+  rejectionReason?: ArcGroupMergeRejectionReason;
+}
+
+export interface MergedArcInfo {
+  newArcId: string;
+  mergedFromArcIds: string[];
+  centerX: number;
+  centerY: number;
+  radius: number;
+  startAngle: number;
+  endAngle: number;
+  direction: 'cw' | 'ccw';
+  fitError: number;
+  arcLength: number;
+  originalError: number;
+  refitError: number;
+  tangentDeltaStats: { mean: number; max: number };
+  simplicityGain: number;
+  mergeReason: string;
+}
+
 export interface ConstructionData {
   width: number;
   height: number;
@@ -183,6 +223,8 @@ export interface ConstructionData {
   graphEdges: ArcGraphEdge[];
   faces: FaceCandidate[];
   faceDebug: FaceDebugSummary;
+  arcGroupMergeDebug: ArcGroupMergeDebug[];
+  mergedArcInfo: MergedArcInfo[];
   conditions: RegionCondition[];
   expression: string;
   generatedAt: string;
@@ -323,4 +365,12 @@ export interface GeneratorSettings {
   interiorFillPenaltyWeight: number;
   targetContourCoverage: number;
   maxGoodRemovalRatio: number;
+  enableArcGroupMerging: boolean;
+  maxMergeGroupSize: number;
+  tangentMergeThreshold: number;
+  refitErrorThreshold: number;
+  errorIncreaseThreshold: number;
+  simplicityWeight: number;
+  tangentWeight: number;
+  errorWeight: number;
 }
