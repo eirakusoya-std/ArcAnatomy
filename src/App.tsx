@@ -1,7 +1,5 @@
 import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { Download, FileJson, ImageUp, Play, RefreshCw, Save, SlidersHorizontal } from 'lucide-react';
-import { buildConstruction } from './geometry/reconstruction';
-import { imageDataToAnalysis } from './geometry/imageProcessing';
 import { buildSvg, downloadText, triggerDownload } from './geometry/exporters';
 import { buildConnectionInfo, buildDerivativeInfo, buildFormulaTable, buildReportData } from './geometry/reporting';
 import type { CircleDebugRow, CircleFittingDebugData, CircleRole, ConstructionData, GeneratorSettings } from './geometry/types';
@@ -69,6 +67,20 @@ interface ResultState {
 interface DebugImage {
   label: string;
   url: string;
+}
+
+interface PythonAnalysis {
+  width: number;
+  height: number;
+  mask: number[];
+  edge: number[];
+  contourPoints: Array<{ x: number; y: number }>;
+  contourSegments: number[][];
+}
+
+interface PythonGenerateResponse {
+  construction: ConstructionData;
+  analysis: PythonAnalysis;
 }
 
 export function App() {
@@ -163,9 +175,26 @@ export function App() {
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
 
     const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    const analysis = imageDataToAnalysis(imageData, settings.threshold, settings.blur, settings.edgeStrength);
+    const response = await fetch('http://127.0.0.1:8765/api/generate', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        width: imageData.width,
+        height: imageData.height,
+        data: Array.from(imageData.data),
+        settings,
+        imageName,
+        title: reportTitle,
+        concept: reportConcept,
+        labels: arcLabels,
+        source: imageUrl.startsWith('data:') ? 'embedded-data-url' : imageUrl,
+      }),
+    });
+    if (!response.ok) throw new Error(`Python generator failed: ${response.status}`);
+    const payload = await response.json() as PythonGenerateResponse;
+    const analysis = normalizePythonAnalysis(payload.analysis);
     const debug = makeLightweightDebug(analysis);
-    const construction = buildConstruction(analysis, [], settings);
+    const construction = payload.construction;
     const maskOverlayUrl = maskToOverlayDataUrl(analysis.mask, analysis.width, analysis.height);
     const debugImages = makeLightweightDebugImages(debug, construction, analysis.width, analysis.height);
     const debugReport = makeDebugReport(construction, debug);
@@ -597,7 +626,15 @@ function maskToOverlayDataUrl(mask: Uint8Array, width: number, height: number) {
   return canvas.toDataURL('image/png');
 }
 
-function makeLightweightDebug(analysis: ReturnType<typeof imageDataToAnalysis>): CircleFittingDebugData {
+function normalizePythonAnalysis(analysis: PythonAnalysis) {
+  return {
+    ...analysis,
+    mask: Uint8Array.from(analysis.mask),
+    edge: Uint8Array.from(analysis.edge),
+  };
+}
+
+function makeLightweightDebug(analysis: ReturnType<typeof normalizePythonAnalysis>): CircleFittingDebugData {
   const contourMask = pointsToMask(analysis.contourPoints, analysis.width, analysis.height);
   const segmentMask = segmentsToMask(analysis.contourPoints, analysis.contourSegments, analysis.width, analysis.height);
   const emptyMask = new Uint8Array(analysis.width * analysis.height);
